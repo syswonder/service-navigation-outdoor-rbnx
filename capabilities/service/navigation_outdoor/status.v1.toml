@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/service/navigation_outdoor/status"
+version = "1"
+kind = "service"
+idl = "outdoor_execution/srv/Status.srv"
+description = "Outdoor reference execution status"
+
+[mode]
+type = "rpc"

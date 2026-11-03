@@ -1,0 +1,21 @@
+# Standalone entry copied into the robot deployment manifest, not a robot activation script.
+service:
+  - name: outdoor_execution
+    url: https://github.com/syswonder/service-navigation-outdoor-rbnx
+    branch: main
+    manifest: package_manifest.jetson-native.yaml
+    config:
+      params_file: config/outdoor_nav2.yaml
+      provider_ids:
+        cloud: front_lidar
+        odom: rtk_wit_localizer
+      topic_remap:
+        localization: /outdoor/localization
+        tf: /outdoor/tf
+        tf_static: /tf_static
+        chassis: /outdoor/chassis_status
+      velocity_output_topic: /robonix/nomotion/outdoor_cmd_vel
+      policy:
+        motion_enabled: false
+        # Set calibration/feedback confirmations only after measuring them.
+        require_chassis_ready: true

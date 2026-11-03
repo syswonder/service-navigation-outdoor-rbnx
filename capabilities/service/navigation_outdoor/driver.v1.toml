@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/service/navigation_outdoor/driver"
+version = "1"
+kind = "service"
+idl = "lifecycle/srv/Driver.srv"
+description = "Outdoor reference execution lifecycle"
+
+[mode]
+type = "rpc"

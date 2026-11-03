@@ -1,0 +1,6 @@
+# Empty run_id returns service readiness and its current execution.
+string run_id
+---
+bool known
+string state
+string status_json

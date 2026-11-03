@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/service/navigation_outdoor/costmap"
+version = "1"
+kind = "service"
+idl = "common_interfaces/nav_msgs/msg/OccupancyGrid.msg"
+description = "Sensor-only global costmap, not a road preference map"
+
+[mode]
+type = "topic_out"

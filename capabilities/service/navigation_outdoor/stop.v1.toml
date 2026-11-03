@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/service/navigation_outdoor/stop"
+version = "1"
+kind = "service"
+idl = "outdoor_execution/srv/Stop.srv"
+description = "Outdoor reference execution stop"
+
+[mode]
+type = "rpc"

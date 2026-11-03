@@ -1,0 +1,6 @@
+# JSON object: frame_id, reference_path, goal, request_id; optional arrival_tolerance_m/localization_grade.
+string request_json
+---
+bool accepted
+string run_id
+string detail

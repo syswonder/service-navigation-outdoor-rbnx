@@ -1,0 +1,2 @@
+Execution algorithms were extracted from Stone749990226/outdoorNav at the snapshot recorded in docs/upstream-snapshot.json. Business planning, scene assets, sensor drivers and localization implementation are not runtime dependencies of this package.
+The Robonix package/lifecycle structure follows syswonder/service-navigation-rbnx. No Robonix framework source or generated bindings are vendored in the runtime source tree; those are generated against the selected SDK at build time.

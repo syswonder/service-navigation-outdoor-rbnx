@@ -1,0 +1,5 @@
+# Empty run_id cancels the current execution only.
+string run_id
+---
+bool accepted
+string detail

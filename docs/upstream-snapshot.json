@@ -1,0 +1,14 @@
+{
+  "repository": "Stone749990226/outdoorNav",
+  "base_commit": "b3798b8e2b35e6b14dd8c5995f63a8f0d4f63c97",
+  "sha256": {
+    "outdoornav/tasks.py": "10da4d928c5ea64558782a60d175fdb54a69376df9c29d04f619e19e8983fcf8",
+    "outdoornav/scan_health.py": "eb261605651052f4a78f777e1e60d5706a23fc45a5114b6bd6a7c5d1ec8df5a0",
+    "outdoornav/routing.py": "138d914f9b84c40e7a38f6e8cbe80a17601ecd5db9927a84200e8237ccfd294c",
+    "ros_ws/src/outdoornav_ros/outdoornav_ros/navigation.py": "51ca339743f6c759a30089e98f0e3fafba9afcb145d61b4bf04822e3c5ac988b",
+    "ros_ws/src/outdoornav_ros/outdoornav_ros/lynx_navigation.py": "ebbc59269b41a0b47bad42400473db4638c19c27da9fd93e9f34867f51dcff36",
+    "ros_ws/src/outdoornav_ros/outdoornav_ros/lynx_watchdog.py": "49980fa84615cfa28515cb9795382da85370ce5f7400ac4bdbf54a0d13ec0171",
+    "ros_ws/src/outdoornav_ros/launch/lynx.launch.py": "32ceb6c899ec00582f6dc0562d695aa7e30dde750eec2d17f081083c58d5f666",
+    "ros_ws/src/outdoornav_ros/config/lynx_navigation.yaml": "f5762a18ae9c46df85226fe8d1ad71aaf5028cea14bf72e5cb6a9dbca30e1f76"
+  }
+}

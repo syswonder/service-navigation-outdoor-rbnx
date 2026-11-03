@@ -1,0 +1,104 @@
+{
+  "scope": "real frontend/HTTP/task executor/Nav2, simulated sensors and virtual kinematics",
+  "robot_connection": false,
+  "domain": 94,
+  "command_topic": "/isolated_task_flow/cmd_vel",
+  "passed": true,
+  "browser_returncode": 0,
+  "events": [
+    {
+      "name": "offroad_goal",
+      "task_id": "7773618696479d03a3526d7d8e002635",
+      "original_goal_preserved": true
+    },
+    {
+      "name": "blockage_wait_and_resume",
+      "task_id": "7773618696479d03a3526d7d8e002635",
+      "waited_without_failing": true
+    },
+    {
+      "name": "arrival",
+      "task_id": "7773618696479d03a3526d7d8e002635",
+      "final_state": "succeeded",
+      "error_m": 2.8608981092597743,
+      "virtual_speed": [
+        0,
+        0
+      ],
+      "completion_pose": {
+        "frame_id": "map",
+        "x": 5.009984929906703,
+        "y": -7.9916255062972485,
+        "yaw": -0.2811978531792865,
+        "stamp_s": 1793696457.5012043,
+        "age_s": 0.07503008842468262
+      }
+    },
+    {
+      "name": "cancel",
+      "task_id": "a5874d4f343a038e951288628c87f355",
+      "final_state": "canceled"
+    },
+    {
+      "name": "replace",
+      "old_id": "632c45fd72d8ce0030845272afedb045",
+      "old_state": "canceled",
+      "new_id": "dbe57a3c0c1381495554c805fb229aca",
+      "new_state": "succeeded"
+    },
+    {
+      "name": "heading_loss",
+      "task_id": "985bfa9bd56ffab1d5141167938cfea4",
+      "final_state": "failed",
+      "reason": "Position or navigation unavailable after 15.0 s; stopped",
+      "heading_stream_dropped": true,
+      "heading_fresh_after_loss": false,
+      "new_request_status": 503
+    },
+    {
+      "name": "recovery",
+      "task_id": "9733280165ce7c4e69e2dd6dbc9a9d2b",
+      "final_state": "succeeded"
+    },
+    {
+      "name": "retained_application",
+      "blocked_plan_status": 400,
+      "backend_pid": 3191
+    }
+  ],
+  "final_virtual_speed": [
+    0.0,
+    0.0
+  ],
+  "marked_children_requiring_cleanup": [],
+  "source_report": "rbnx-build/validation/isolated-task-flow-20261103/run-090014/report.json",
+  "source_sha256": "b9220d33ae26573f3021a2629e45c3b2709cce98e95e6ec40f9d2b7f4235af09",
+  "final_scope": {
+    "domain": 94,
+    "localhost_only": true,
+    "virtual_only": true,
+    "command_topic": "/isolated_task_flow/cmd_vel",
+    "localization_mode": "rtk_imu",
+    "external_odometry_published": false,
+    "x": 5.061273618851425,
+    "y": -25.76563514394115,
+    "yaw": -1.557060670246686,
+    "v": 0.0,
+    "w": 0.0,
+    "start": {
+      "x": -0.442373645505109,
+      "y": -0.15091718521521144
+    },
+    "direction": [
+      0.3209189197754099,
+      -0.9471066713576586
+    ],
+    "nonzero_commands": 1525,
+    "field_policy": true,
+    "arrival_tolerance_m": 3.0,
+    "weighted_roads": true,
+    "heading_stream": true,
+    "isolation_failure": null,
+    "backend_pid": 3191
+  }
+}

@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/service/navigation_outdoor/follow_reference"
+version = "1"
+kind = "service"
+idl = "outdoor_execution/srv/FollowReference.srv"
+description = "Outdoor reference execution follow_reference"
+
+[mode]
+type = "rpc"

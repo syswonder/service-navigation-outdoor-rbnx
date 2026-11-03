@@ -1,0 +1,23 @@
+manifestVersion: 1
+package:
+  name: robonix.service.navigation.outdoor
+  version: 0.1.0
+  description: Reference-route Nav2 execution and obstacle avoidance with external localization.
+  license: MIT
+capability_id: outdoor_execution
+build: bash scripts/build.sh
+start: bash scripts/start.sh
+stop: bash scripts/stop.sh
+capabilities:
+  - name: robonix/service/navigation_outdoor/driver
+    transport: grpc
+  - name: robonix/service/navigation_outdoor/follow_reference
+    transport: [grpc, mcp]
+  - name: robonix/service/navigation_outdoor/status
+    transport: [grpc, mcp]
+  - name: robonix/service/navigation_outdoor/cancel
+    transport: [grpc, mcp]
+  - name: robonix/service/navigation_outdoor/stop
+    transport: [grpc, mcp]
+  - name: robonix/service/navigation_outdoor/costmap
+    transport: ros2
