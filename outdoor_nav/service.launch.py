@@ -25,6 +25,7 @@ def nodes(context):
     runtime_file = LaunchConfiguration("runtime").perform(context)
     runtime = json.loads(Path(runtime_file).read_text())
     robot = runtime["policy"]
+    worker_python = runtime.get("worker_python", sys.executable)
     params = yaml.safe_load(Path(runtime["params_file"]).read_text())
     params["planner_server"]["ros__parameters"]["GridBased"]["tolerance"] = robot[
         "planner_tolerance_m"
@@ -126,7 +127,7 @@ def nodes(context):
     children = [
         ExecuteProcess(
             cmd=[
-                sys.executable,
+                worker_python,
                 "-m",
                 "outdoor_nav.runtime",
                 "--runtime",
@@ -137,7 +138,7 @@ def nodes(context):
         ),
         ExecuteProcess(
             cmd=[
-                sys.executable,
+                worker_python,
                 "-m",
                 "outdoor_nav.guard",
                 *rosargs,

@@ -23,11 +23,12 @@ from rclpy.qos import qos_profile_sensor_data
 from rclpy.parameter import Parameter
 from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import String
+from std_msgs.msg import String, UInt32
 from tf2_ros import Buffer, TransformListener
 
 from .configuration import load_runtime
 from .core.scan_health import healthy_scan
+from .core.gait import GaitSchedule
 from .core.tasks import TaskStore, TERMINAL
 from .executor import Executor, LATCHED
 from .http import serve, ApiError
@@ -88,6 +89,9 @@ class OutdoorExecutor(Executor):
             for n in ("planner_server", "controller_server")
         }
         self.command_pub = self.create_publisher(Twist, "/outdoor/safe_command", 10)
+        self.gait_schedule = self.gait_task = None
+        self.gait_pub = (self.create_publisher(UInt32, self.runtime["gait_output_topic"], 10)
+                         if self.runtime.get("gait_switching_enabled", False) else None)
         self.path_pub = self.create_publisher(
             NavPath, "/navigation/execution_path", LATCHED
         )
@@ -117,6 +121,7 @@ class OutdoorExecutor(Executor):
             (0.1, self.dispatch),
             (1.0, self.poll_lifecycle),
             (0.1, self.check_stationary),
+            (0.1, self.gait_tick),
         ):
             self.create_timer(
                 interval, callback, clock=self.steady, callback_group=self.group
@@ -148,6 +153,37 @@ class OutdoorExecutor(Executor):
             and now - self.stationary_since >= self.config["stop_hold_s"]
         ):
             self.startup_stopped = True
+
+    def gait_tick(self):
+        with self.state_lock:
+            task = self.tasks.snapshot(self.owner) if self.owner else None
+            if (self.gait_pub is None or not task or task["cancel_requested"]
+                    or task["state"] not in ("planning", "navigating", "replanning")
+                    or not task.get("intervals")):
+                self.gait_schedule = self.gait_task = None
+                return
+            if self.gait_task != task["task_id"]:
+                self.gait_schedule = GaitSchedule(task["reference_path"], task["intervals"])
+                self.gait_task = task["task_id"]
+            position = self.pose()
+            if position is None or not 0 <= position["age_s"] < self.config["sensor_timeout_s"]:
+                return
+            now, body = time.monotonic(), self.chassis
+            motion_age = body.get("motion_feedback_age_s")
+            mode_age = body.get("usage_mode_age_s")
+            motion_age = motion_age if type(motion_age) in (float, int) else math.inf
+            mode_age = mode_age if type(mode_age) in (float, int) else math.inf
+            received_age = now - self.chassis_at
+            health = self.status(False)["health"]
+            eligible = (all(v for k, v in health.items() if k != "chassis")
+                        and received_age < 1. and body.get("state") == 17
+                        and body.get("usage_mode") == 1 and 0 <= mode_age < 3.
+                        and 0 <= motion_age < 1. and body.get("gait_output_enabled") is True)
+            command, status = self.gait_schedule.tick(
+                position, now, body.get("gait"), max(motion_age, received_age), eligible)
+            if command is not None:
+                self.gait_pub.publish(UInt32(data=command))
+            self.tasks.update(task["task_id"], gait_status=status)
 
     def on_geo(self, msg):
         self._state(msg, "geo")
@@ -239,6 +275,9 @@ class OutdoorExecutor(Executor):
             "ready": all(health.values()),
             "health": health,
             "localization_grade": g.get("grade"),
+            "coordinate_reference": g.get("coordinate_reference"),
+            "gait_status": owned.get("gait_status") if owned else None,
+            "gait_switching_enabled": self.runtime.get("gait_switching_enabled", False),
             "heading": g.get("heading"),
             "feedback": g.get("feedback"),
             "pose": pose,

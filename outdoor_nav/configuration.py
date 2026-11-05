@@ -132,6 +132,12 @@ def validate(config, base=None):
         "/outdoor/controller_command",
     ):
         raise ValueError("Velocity input/output must not form a loop")
+    gait_enabled = config.get("gait_switching_enabled", False)
+    if type(gait_enabled) is not bool:
+        raise ValueError("gait_switching_enabled must be boolean")
+    gait_output = topic(config.get("gait_output_topic", "/robonix/nomotion/outdoor_gait"))
+    if gait_output in (*bindings.values(), output, "/GAIT"):
+        raise ValueError("Gait requests need a separate guarded UInt32 output topic")
     grid = config.get(
         "global_grid",
         {
@@ -166,6 +172,8 @@ def validate(config, base=None):
         "policy": policy,
         "topic_remap": bindings,
         "velocity_output_topic": output,
+        "gait_switching_enabled": gait_enabled,
+        "gait_output_topic": gait_output,
         "global_grid": grid,
     }
 

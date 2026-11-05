@@ -17,6 +17,9 @@ properties:
       localization:
         type: string
         x-provider: robonix/service/localization/status
+      chassis:
+        type: string
+        x-provider: robonix/primitive/chassis/gait_in
   topic_remap:
     type: object
     description: Absolute ROS topics; explicit values override Atlas. Roles cloud, scan, odom, localization, chassis, tf, tf_static. localization is resolved from the selected localization service unless explicitly bound.
@@ -26,6 +29,14 @@ properties:
   velocity_output_topic:
     type: string
     default: /robonix/nomotion/outdoor_cmd_vel
+  gait_switching_enabled:
+    type: boolean
+    default: false
+    description: Use explicit route intervals for non-blocking feedback-confirmed gait requests.
+  gait_output_topic:
+    type: string
+    default: /robonix/nomotion/outdoor_gait
+    description: UInt32 request topic; when enabled and omitted, resolve the selected chassis gait_in capability.
   global_grid:
     type: object
     description: Sensor-only map extent; origin in metres, width/height in metres, resolution in metres/cell. No static mask.

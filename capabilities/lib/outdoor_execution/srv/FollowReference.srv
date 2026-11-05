@@ -1,4 +1,5 @@
-# JSON object: frame_id, reference_path, goal, request_id; optional arrival_tolerance_m/localization_grade.
+# JSON: frame_id, reference_path, goal, request_id; optional arrival_tolerance_m/localization_grade.
+# Optional map_id/version/origin_wgs84 together; intervals follow this reference_path arc length.
 string request_json
 ---
 bool accepted

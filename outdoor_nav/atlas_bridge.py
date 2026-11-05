@@ -58,6 +58,21 @@ def resolve(config):
             previous.close()
         channels[role] = channel
         config["topic_remap"][role] = channel.endpoint
+    if config.get("gait_switching_enabled", False) and "gait_output_topic" not in config:
+        contract = "robonix/primitive/chassis/gait_in"
+        found = ATLAS.find_capability(contract_id=contract, transport="ros2",
+                                     provider_id=config.get("provider_ids", {}).get("chassis", ""))
+        if not found:
+            return None, "Missing provider for guarded gait input"
+        channel = service.connect_capability(found[0], contract_id=contract, transport="ros2")
+        if not channel.endpoint:
+            channel.close()
+            return None, "Guarded gait endpoint is empty"
+        previous = channels.get("gait")
+        if previous:
+            previous.close()
+        channels["gait"] = channel
+        config["gait_output_topic"] = channel.endpoint
     # JSON localization readiness is deliberately explicit, not guessed from odometry.
     if not config["topic_remap"].get("localization"):
         return None, "topic_remap.localization is required (documented readiness JSON)"

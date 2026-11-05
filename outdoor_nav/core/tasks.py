@@ -35,6 +35,11 @@ class Task:
     localization_grade: str | None = None
     arrival_tolerance_m: float | None = None
     road_offroad_cost: int | None = None
+    map_id: str | None = None
+    map_version: str | None = None
+    origin_wgs84: dict | None = None
+    intervals: list = field(default_factory=list)
+    gait_status: dict | None = None
 
 
 class TaskStore:
