@@ -11,7 +11,7 @@
 
 不自带地图场景、网页、RTK/IMU/雷达驱动，不使用山猫 `/ODOM`，不自动站起或切使用模式。明确标注的路线区段可以请求切换导航步态，由外部原语校验并转发。
 默认速度输出是 **`/robonix/nomotion/outdoor_cmd_vel`**，初始未激活且 `motion_enabled=false`。
-本轮仅本地隔离验证，不代表已在机器人上部署或验收。
+本轮完成隔离验证；真实上下楼梯和现场到点停车仍待验收。
 
 ## 仓库结构
 
@@ -22,7 +22,7 @@
 - `outdoor_nav/runtime.py`、`executor.py`：唯一执行 owner、滚动窗口、停车确认和状态。
 - `outdoor_nav/guard.py`：独立速度/扫描/定位看门狗，保留原链路的失效归零。
 - `outdoor_nav/service.launch.py`：仅启动投影、执行器、守卫及 Nav2；不启动外部传感器与定位。
-- `tests/`：原算法 AST 对比、参数/请求/生命周期测试、接原网页场景的隔离测试。
+- `tests/`：冻结算法对照、参数/请求/生命周期、Scene/gRPC 接入和隔离 Nav2 楼梯测试。
 - `docs/upstream-snapshot.json`：被提取源码的 SHA-256；`tests/upstream_executor.py.txt` 是只用于对比的冻结参照。
 
 参考服务结构：[syswonder/service-navigation-rbnx](https://github.com/syswonder/service-navigation-rbnx)。不直接复制其室内静态地图依赖、控制器插件、停止脚本或传感器默认参数。
@@ -98,13 +98,17 @@ bash scripts/build.sh
 
 楼梯区段前 1 米请求楼梯步态，离开后 1 米请求平地步态；邻近的扩展区间重叠时合并，避免在短缝隙反复切换。沿原参考折线有序跟踪进度，不用全局最近道路猜路段；反向行走必须使用已按方向重排的区段。
 
-不为切换单独停车，不等确认再继续控制器循环。未收到新鲜真实反馈确认时，每秒重试一次，无次数/总时限上限；状态含目标码、实际码、确认、尝试次数和原因，供前端提示。当前任务取消、替换或结束后不再发送，原有定位/避障/底盘状态保护仍然生效。未知区段不猜步态；无区段的旧地图保持人工选择的步态。
+切换时先阻断速度输出，等待新鲜实测线速度、角速度低于停车阈值并持续 `stop_hold_s`，再每秒请求一次步态。只有新鲜 `/MOTION_INFO` 确认目标码后才继续；默认 `policy.gait_switch_timeout_s=10` 秒失败退出并停车。Scene 显示等待原因和任务失败原因。未知步态区段拒绝执行。
 
-只请求 gait，不调用 posture、站起或使用模式切换；若外部 posture 将步态改回平地，会从实际反馈发现并按当前楼梯区段重试。不新增人工抢占策略。1 米是指定缓冲，不保证覆盖所有浮点定位误差；终点容差仍为任务既有配置，不是楼梯边界的精度保证。实机上下楼梯未验收。
+所有楼梯区段及上述缓冲使用 `StairsFollowPath` 沿参考线跟踪，暂停局部碰撞检查及 NavFn 绕行；平地切回原 DWB 和避障。需要安装 `nav2_regulated_pure_pursuit_controller`。保留急停、底盘状态、传感器新鲜度、定位断流及停车确认。默认到点容差仍为 3 米。
 
-## 手动网页联调
+只请求 gait，不调用 posture、站起或使用模式切换。外部姿态指令改变步态时会停车重新确认。1 米缓冲不保证覆盖定位误差；本轮未验证真实上下楼梯。隔离真实 Nav2 测试入口：`tests/stairs_smoke.py`（仅域 188，虚拟传感器及命令出口）。
 
-本机已有联调容器时，运行 `bash scripts/demo_web.sh` 并保持终端开启，再打开 **http://127.0.0.1:19865/**。网页来自原仓，业务网关把完整参考路线经 gRPC 交给本 service；运动仅发生在虚拟底盘。停止用 `bash scripts/demo_web.sh stop`。启动条件、数据流和请求格式见 [网页联调](docs/WEB_TESTING.md)。
+## Scene 接入
+
+Scene 使用本包的 `outdoor_nav.scene.SceneNavigation`，只接收当前建图服务的参考路线，不读取旧 bundle、地点文件或旧网页。部署由机器人仓库的 `outdoor/` 提供，地图与原始记录始终由建图服务保存。
+
+导航请求记录最多保留 1024 个，每个最多 2 MiB；达到上限时拒绝新请求并提示归档，不静默删除幂等重试记录。旧网页地图/规划/障碍注入入口已从导航进程移除。
 
 ## 测试
 
@@ -113,20 +117,4 @@ source /opt/ros/humble/setup.bash
 PYTHONPATH=. python3 -m pytest -q
 ```
 
-隔离全流程需要原 outdoorNav **作为外部业务/虚拟传感器测试夹具**，不是服务运行依赖。测试容器挂载本仓 `/service`、原仓 `/baseline`，安装其 Node/Playwright 和本仓 ROS 依赖后：
-
-```bash
-# 仅在 Docker 内；启动的是虚拟底盘，命令被限制到 /isolated_task_flow/cmd_vel。
-PYTHONPATH=/service:/baseline:/baseline/ros_ws/src/outdoornav_ros \
-  /baseline/.venv/bin/python /service/tests/run_isolated_flow.py
-```
-
-测试脚本复用原网页任务用例，但原 `lynx_navigation` 和原 watchdog **不启动**：网页业务层生成参考路线，新 service 执行。RTK/WIT 数据与底盘为虚拟输入。扫描点高度落在当前配置高度带内，以真实触发闭合障碍圈。
-
-## 保持与不包含的能力
-
-保留：约 6 m 有序窗口、短段 NavFn 规划、DWB 连续跟随、中间点不停稳、任务到达/停车分离、取消/替换、阻塞等待与恢复、航向/定位/扫描/指令断流归零、速度限幅、禁止倒车/横移、输入无效/输出冲突拒绝。
-
-不包含：道路权重与滑条、地图底图、业务地点/网页、原始定位解算、底盘桥、后雷达、坑洞/台阶感知、额外 Collision Monitor 安全区。前雷达近距过滤仍是兼容配置，不宣称已完成自车/腿部几何分割。
-
-验证范围、原功能对应表与未验项目见 [VALIDATION.md](docs/VALIDATION.md)。
+独立回归不需要原工程或校园资源。`tests/test_scene.py` 与 `test_scene_wire.py` 验证新地图身份、步态区段、幂等重试和真实 gRPC；`tests/stairs_smoke.py` 在隔离域 188 使用真实 Nav2 和虚拟传感器验证空地图启动、步态确认、楼梯避障暂停/恢复及超时停车。历史算法冻结快照仅用于回归来源对照，不在运行路径中。

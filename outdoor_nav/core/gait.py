@@ -88,6 +88,8 @@ class GaitSchedule:
                 self.stairs.append([a, b])
         self.target = None
         self.last_sent, self.attempts = -math.inf, 0
+        self.switch_started = None
+        self.failed = False
 
     def desired(self, station):
         if any(a <= station < b or (station == b == self.route.offsets[-1])
@@ -98,23 +100,34 @@ class GaitSchedule:
                 return FLAT if item["gait"] == "flat" else None
         return None
 
-    def tick(self, position, now, actual, feedback_age_s, eligible):
+    def tick(self, position, now, actual, feedback_age_s, eligible, stopped=False, timeout_s=10.):
         station = self.route.update(position)
         target = self.desired(station)
         if target != self.target:
             self.target, self.last_sent, self.attempts = target, -math.inf, 0
+            self.switch_started = None
         fresh = math.isfinite(feedback_age_s) and 0 <= feedback_age_s < 1.
         confirmed = target is not None and fresh and actual == target
+        if not confirmed and self.switch_started is None:
+            self.switch_started = now
+        if confirmed:
+            self.switch_started = None
+        if target is None or (self.switch_started is not None and now-self.switch_started >= timeout_s):
+            self.failed = True
         command = None
-        if target is not None and not confirmed and eligible and now - self.last_sent >= 1.:
+        if not self.failed and not confirmed and eligible and stopped and now - self.last_sent >= 1.:
             command, self.last_sent = target, now
             self.attempts += 1
         reason = ("unknown_route_gait" if target is None else
+                  "gait_switch_timeout" if self.failed else
                   None if confirmed else
+                  "stopping_before_gait_switch" if not stopped else
                   "waiting_for_eligible_state" if not eligible else
                   "gait_feedback_stale" if not fresh else "gait_not_confirmed_retrying")
         return command, {
             "automatic": True, "target_code": target, "actual_code": actual,
             "confirmed": confirmed, "feedback_fresh": fresh, "attempts": self.attempts,
             "route_progress_m": station, "reason": reason,
+            "failed": self.failed, "motion_allowed": confirmed and not self.failed,
+            "local_avoidance_enabled": target != STAIRS,
         }

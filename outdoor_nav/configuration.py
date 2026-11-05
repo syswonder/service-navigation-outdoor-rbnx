@@ -23,6 +23,7 @@ DEFAULTS = {
     "stopped_linear_mps": 0.03,
     "stopped_angular_rps": 0.03,
     "stop_hold_s": 1.0,
+    "gait_switch_timeout_s": 10.0,
     "transform_tolerance_s": 0.2,
     "inflation_padding_m": 0.1,
     "inflation_cost_scaling": 5.0,
@@ -94,6 +95,7 @@ def validate(config, base=None):
         "fixed_arrival_m",
         "float_arrival_m",
         "stop_hold_s",
+        "gait_switch_timeout_s",
         "footprint_radius_m",
         "stopped_linear_mps",
         "stopped_angular_rps",
@@ -149,7 +151,9 @@ def validate(config, base=None):
     )
     if (
         not isinstance(grid, dict)
-        or set(grid) != {"origin", "width", "height", "resolution"}
+        or set(grid) - {"origin", "width", "height", "resolution", "rolling"}
+        or not {"origin", "width", "height", "resolution"} <= set(grid)
+        or type(grid.get("rolling", False)) is not bool
         or not isinstance(grid["origin"], list)
         or len(grid["origin"]) != 2
     ):

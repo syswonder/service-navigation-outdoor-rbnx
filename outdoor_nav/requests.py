@@ -96,7 +96,12 @@ def submit(node, payload):
                     or ref.get("map_offset_xy_m") != [0., 0.]
                     or ref.get("antenna_xy_m") != [0., 0.]):
                 raise ApiError(409, "Route and live localization coordinate references differ")
+            if ref.get("map_id") is not None and (ref.get("map_id") != metadata["map_id"]
+                                                  or ref.get("version") != metadata["map_version"]):
+                raise ApiError(409, "Route and localization map identities differ")
         if metadata["intervals"]:
+            if any(i["gait"] == "unknown" for i in metadata["intervals"]):
+                raise ApiError(409, "Unknown route gait; inspect the recording before execution")
             if not getattr(node, "runtime", {}).get("gait_switching_enabled", False):
                 raise ApiError(503, "Automatic gait switching is not configured")
             if (node.config.get("require_chassis_ready", False)

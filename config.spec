@@ -32,14 +32,14 @@ properties:
   gait_switching_enabled:
     type: boolean
     default: false
-    description: Use explicit route intervals for non-blocking feedback-confirmed gait requests.
+    description: Stop before gait changes and wait for fresh feedback; policy.gait_switch_timeout_s defaults to 10 seconds. Stairs use reference tracking without local avoidance.
   gait_output_topic:
     type: string
     default: /robonix/nomotion/outdoor_gait
     description: UInt32 request topic; when enabled and omitted, resolve the selected chassis gait_in capability.
   global_grid:
     type: object
-    description: Sensor-only map extent; origin in metres, width/height in metres, resolution in metres/cell. No static mask.
+    description: Sensor-only map extent; origin, width/height and resolution are in metres. Optional rolling keeps the global sensor window around the robot. No static mask.
   run_dir:
     type: string
     description: Owned runtime files, PID, journal and logs.
@@ -50,3 +50,4 @@ properties:
   action_wait_s:
     type: number
     default: 45
+    description: Maximum wait for worker status during process initialization. Sensor and Nav2 readiness gate tasks separately.

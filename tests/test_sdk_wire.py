@@ -68,6 +68,7 @@ def test_real_sdk_driver_and_rpc_mcp_wire(monkeypatch):
         on_activate=bridge.activate,
         on_deactivate=bridge.deactivate,
         on_shutdown=bridge.shutdown,
+        requested_contract_id="robonix/service/navigation_outdoor/driver",
     )
     assert lifecycle is not None
     lifecycle[1](lifecycle[0], server)

@@ -36,6 +36,20 @@ def nodes(context):
     params["controller_server"]["ros__parameters"]["FollowPath"][
         "trans_stopped_velocity"
     ] = robot["stopped_linear_mps"]
+    controllers = params["controller_server"]["ros__parameters"]
+    controllers["StairsFollowPath"] = {
+        "plugin": "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController",
+        "desired_linear_vel": min(.15, robot["max_speed_mps"]),
+        "lookahead_dist": .5, "min_lookahead_dist": .25, "max_lookahead_dist": .6,
+        "use_velocity_scaled_lookahead_dist": False,
+        "rotate_to_heading_angular_vel": min(.2, robot["max_angular_speed_rps"]),
+        "use_rotate_to_heading": True, "allow_reversing": False,
+        "max_angular_accel": .6, "transform_tolerance": robot["transform_tolerance_s"],
+        "use_collision_detection": False, "use_cost_regulated_linear_velocity_scaling": False,
+        "use_regulated_linear_velocity_scaling": True,
+        "min_approach_linear_velocity": .05,
+    }
+    controllers["controller_plugins"] = ["FollowPath", "StairsFollowPath"]
     grid = {
         **runtime["global_grid"],
         "width": runtime["global_grid"]["width"] / runtime["global_grid"]["resolution"],
@@ -50,7 +64,7 @@ def nodes(context):
             "use_sim_time": False,
             "global_frame": frame,
             "robot_base_frame": "base_link",
-            "rolling_window": rolling,
+            "rolling_window": rolling or runtime["global_grid"].get("rolling", False),
             # Unknown cells ahead of the robot must not be treated as collisions;
             # the planner keeps its own allow_unknown policy on the global grid.
             "track_unknown_space": robot["local_track_unknown"] if rolling else True,

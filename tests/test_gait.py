@@ -17,11 +17,11 @@ INTERVALS = [
 ORIGIN = {"latitude":30., "longitude":120.}
 
 
-def tick(schedule, station, now=0., actual=FLAT, age=0., eligible=True):
-    return schedule.tick({"x":station, "y":0.}, now, actual, age, eligible)
+def tick(schedule, station, now=0., actual=FLAT, age=0., eligible=True, stopped=True):
+    return schedule.tick({"x":station, "y":0.}, now, actual, age, eligible, stopped=stopped)
 
 
-def test_one_meter_before_and_after_without_stopping():
+def test_one_meter_before_and_after_boundaries():
     schedule = GaitSchedule(REFERENCE, INTERVALS)
     assert tick(schedule, 3.99)[1]["target_code"] == FLAT
     assert tick(schedule, 4.)[0] == STAIRS
@@ -29,16 +29,20 @@ def test_one_meter_before_and_after_without_stopping():
     assert tick(schedule, 11., 2., STAIRS)[0] == FLAT
 
 
-def test_retry_is_rate_limited_unbounded_and_requires_real_feedback():
+def test_retry_is_bounded_and_requires_measured_stop_and_real_feedback():
     schedule = GaitSchedule(REFERENCE, INTERVALS)
-    assert tick(schedule, 5., 0.)[0] == STAIRS
+    command,state=tick(schedule, 5., 0., stopped=False)
+    assert command is None and not state['motion_allowed']
+    assert tick(schedule, 5., .1)[0] == STAIRS
     assert tick(schedule, 5., .5)[0] is None
-    assert tick(schedule, 5., 1.)[1]["attempts"] == 2
-    assert tick(schedule, 5., 10000.)[1]["attempts"] == 3
-    assert tick(schedule, 5., 10001., STAIRS)[1]["confirmed"]
+    assert tick(schedule, 5., 1.1)[1]["attempts"] == 2
+    assert tick(schedule, 5., 2., STAIRS)[1]["motion_allowed"]
     # A later posture command resetting flat must be detected, not a permanent latch.
-    assert tick(schedule, 5., 10002., FLAT)[0] == STAIRS
-    assert not tick(schedule, 5., 10003., STAIRS, age=2.)[1]["confirmed"]
+    assert tick(schedule, 5., 3., FLAT)[0] == STAIRS
+    assert not tick(schedule, 5., 4., STAIRS, age=2.)[1]["motion_allowed"]
+    command,state=tick(schedule,5.,13.)
+    assert command is None and state['failed'] and not state['motion_allowed']
+    assert state['reason']=='gait_switch_timeout'
 
 
 def test_unsafe_state_does_not_publish_and_unknown_is_not_guessed():
@@ -53,7 +57,7 @@ def test_unsafe_state_does_not_publish_and_unknown_is_not_guessed():
 
 def test_reverse_route_and_start_inside_stairs():
     reverse = GaitSchedule(list(reversed(REFERENCE)), INTERVALS)
-    assert reverse.tick({"x":16., "y":0.},0.,FLAT,0.,True)[0] == STAIRS
+    assert reverse.tick({"x":16., "y":0.},0.,FLAT,0.,True,stopped=True)[0] == STAIRS
     inside = GaitSchedule(REFERENCE, [{"start_m":0., "end_m":3., "gait":"stairs", "gait_code":STAIRS},
                                      {"start_m":3., "end_m":20., "gait":"flat", "gait_code":FLAT}])
     assert tick(inside,0.)[0] == STAIRS
@@ -117,7 +121,7 @@ def test_wrong_origin_and_unconfigured_gait_reject_before_task_replacement():
     assert not node.tasks.tasks
 
 
-def test_worker_gait_tick_does_not_pause_velocity_and_cancel_stops_retries(monkeypatch):
+def test_worker_stops_until_actual_feedback_and_controller_match(monkeypatch):
     from outdoor_nav.runtime import OutdoorExecutor
     import outdoor_nav.runtime as runtime
     node, status = task_node()
@@ -129,6 +133,11 @@ def test_worker_gait_tick_does_not_pause_velocity_and_cancel_stops_retries(monke
     node.gait_pub = SimpleNamespace(publish=lambda msg: sent.append(msg.data))
     node.pose = lambda: {"x":4., "y":0., "age_s":.01}
     node.config["sensor_timeout_s"] = 1.
+    node.config.update(stop_hold_s=1.,gait_switch_timeout_s=10.)
+    node.stationary_since=99.
+    node.velocity_at=100.
+    velocities=[]
+    node.command_pub=SimpleNamespace(publish=lambda msg:velocities.append(msg.linear.x))
     node.stopping = False
     node.chassis = {"state":17,"gait":FLAT,"usage_mode":1,"motion_feedback_age_s":.01,
                     "usage_mode_age_s":.01,"gait_output_enabled":True}
@@ -136,8 +145,16 @@ def test_worker_gait_tick_does_not_pause_velocity_and_cancel_stops_retries(monke
     node.status = lambda *_: {"health":{"chassis":True,"localization":True,"motion_enabled":True}}
     monkeypatch.setattr(runtime.time,"monotonic",lambda:100.1)
     OutdoorExecutor.gait_tick(node)
-    assert sent == [STAIRS] and node.stopping is False
+    assert sent == [STAIRS] and velocities==[0.]
     assert not node.tasks.snapshot()["gait_status"]["confirmed"]
+    node.controller_id=lambda:'StairsFollowPath'
+    assert not OutdoorExecutor.motion_allowed(node,node.tasks.snapshot())
+    node.chassis['gait']=STAIRS
+    OutdoorExecutor.gait_tick(node)
+    node.active_controller='FollowPath'
+    assert not OutdoorExecutor.motion_allowed(node,node.tasks.snapshot())
+    node.active_controller='StairsFollowPath'
+    assert OutdoorExecutor.motion_allowed(node,node.tasks.snapshot())
     node.tasks.cancel(task["task_id"])
     OutdoorExecutor.gait_tick(node)
     assert sent == [STAIRS] and node.gait_schedule is None

@@ -319,6 +319,12 @@ class Executor(Node):
                 self.cancel_client.call_async(request)
                 self.cancel_sent.add(task_id)
 
+    def motion_allowed(self, task):
+        return True
+
+    def controller_id(self):
+        return "FollowPath"
+
     def safety_tick(self):
         state = (
             self.tasks.snapshot(self.owner, include_paths=False) if self.owner else None
@@ -329,6 +335,7 @@ class Executor(Node):
             and not state["cancel_requested"]
             and state["state"] in ("navigating", "replanning")
             and self.status(False)["ready"]
+            and self.motion_allowed(state)
             and time.monotonic() - self.raw_received
             < (self.config["command_timeout_s"] if self.hardware else 0.5)
         )
@@ -619,10 +626,18 @@ class Executor(Node):
                 controller_patience_s=policy.get("controller_patience_s", 20.0),
             )
             started_sim = self.get_clock().now().nanoseconds / 1e9
+            controller_used = None
             while True:
                 if self.interrupted(task_id):
                     raise InterruptedError("Task canceled or superseded")
                 position = await self.wait_for_ready_pose(task_id)
+                controller_id = self.controller_id()
+                if controller_used is not None and controller_id != controller_used:
+                    self.stopping = True
+                    if not await self.release_controller(follow_requests, follow_results):
+                        raise RuntimeError("Cannot release controller at gait boundary")
+                    current_points, follow_result, sent_window = [], None, None
+                controller_used = controller_id
                 now = self.get_clock().now().nanoseconds / 1e9
                 budget.moved(position["x"], position["y"], now)
                 window = guidance.window(position)
@@ -749,7 +764,7 @@ class Executor(Node):
                     )
                     command = FollowPath.Goal()
                     command.path = path
-                    command.controller_id = "FollowPath"
+                    command.controller_id = controller_id
                     command.goal_checker_id = "goal_checker"
                     pending = self.follow_client.send_goal_async(command)
                     follow_requests.append(pending)
@@ -785,6 +800,7 @@ class Executor(Node):
                         reason=None,
                     )
                     self.stopping = False
+                    self.active_controller = controller_id
                     self.path_pub.publish(path)
                 await self.pause(0.1)
         except InterruptedError as error:

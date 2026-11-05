@@ -86,16 +86,15 @@ class RuntimeManager:
                         "Worker exited; inspect " + str(run / "worker.log")
                     )
                 try:
-                    health = self.request("/api/status")["health"]
-                    if all(
-                        health.get(k)
-                        for k in ("actions", "planner_server", "controller_server")
-                    ):
+                    # A blank map has no TF until capture/save/load. Readiness is
+                    # checked for every task and command, not during Driver INIT.
+                    status = self.request("/api/status")
+                    if isinstance(status.get("health"), dict):
                         return
                 except OSError:
                     pass
                 time.sleep(0.1)
-            raise TimeoutError("Outdoor Nav2 actions did not become ready")
+            raise TimeoutError("Outdoor worker status did not become available")
         except Exception:
             self.shutdown()
             raise

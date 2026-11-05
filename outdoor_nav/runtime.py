@@ -28,7 +28,7 @@ from tf2_ros import Buffer, TransformListener
 
 from .configuration import load_runtime
 from .core.scan_health import healthy_scan
-from .core.gait import GaitSchedule
+from .core.gait import GaitSchedule, STAIRS
 from .core.tasks import TaskStore, TERMINAL
 from .executor import Executor, LATCHED
 from .http import serve, ApiError
@@ -131,7 +131,6 @@ class OutdoorExecutor(Executor):
             "/controller_server/set_parameters_atomically",
             callback_group=self.group,
         )
-        self.obstacles = self.places = None
         self.http = serve(
             self, port=self.runtime.get("http_port", 19975), host="127.0.0.1"
         )
@@ -180,10 +179,52 @@ class OutdoorExecutor(Executor):
                         and body.get("usage_mode") == 1 and 0 <= mode_age < 3.
                         and 0 <= motion_age < 1. and body.get("gait_output_enabled") is True)
             command, status = self.gait_schedule.tick(
-                position, now, body.get("gait"), max(motion_age, received_age), eligible)
+                position, now, body.get("gait"), max(motion_age, received_age), eligible,
+                stopped=(self.stationary_since is not None
+                         and now-self.stationary_since >= self.config["stop_hold_s"]
+                         and now-self.velocity_at < self.config["sensor_timeout_s"]),
+                timeout_s=self.config["gait_switch_timeout_s"])
             if command is not None:
                 self.gait_pub.publish(UInt32(data=command))
             self.tasks.update(task["task_id"], gait_status=status)
+            if not status["motion_allowed"]:
+                self.command_pub.publish(Twist())
+
+    def controller_id(self):
+        return "StairsFollowPath" if self.gait_schedule and self.gait_schedule.target == STAIRS else "FollowPath"
+
+    def motion_allowed(self, task):
+        if not task or not task.get("intervals"):
+            return True
+        state = task.get("gait_status") or {}
+        now = time.monotonic()
+        age = self.chassis.get("motion_feedback_age_s")
+        return (state.get("motion_allowed") is True
+                and now-self.chassis_at < 1.
+                and type(age) in (float, int) and 0 <= age < 1.
+                and self.chassis.get("gait") == state.get("target_code")
+                and getattr(self, "active_controller", None) == self.controller_id())
+
+    async def wait_for_ready_pose(self, task_id):
+        was_stopping = self.stopping
+        while True:
+            position = await super().wait_for_ready_pose(task_id)
+            self.gait_tick()
+            task = self.tasks.snapshot(task_id, include_paths=False)
+            gait = task.get("gait_status") or {}
+            if gait.get("failed"):
+                raise RuntimeError("步态切换失败，已停车："+str(gait.get("reason")))
+            if not task.get("intervals") or gait.get("motion_allowed"):
+                self.stopping = was_stopping
+                return position
+            self.stopping = True
+            self.command_pub.publish(Twist())
+            await self.pause(.05)
+
+    def path_obstructed(self, points, position):
+        if self.controller_id() == "StairsFollowPath":
+            return False
+        return super().path_obstructed(points, position)
 
     def on_geo(self, msg):
         self._state(msg, "geo")
@@ -278,6 +319,7 @@ class OutdoorExecutor(Executor):
             "coordinate_reference": g.get("coordinate_reference"),
             "gait_status": owned.get("gait_status") if owned else None,
             "gait_switching_enabled": self.runtime.get("gait_switching_enabled", False),
+            "local_avoidance_enabled": not self.owner or self.controller_id() == "FollowPath",
             "heading": g.get("heading"),
             "feedback": g.get("feedback"),
             "pose": pose,
@@ -359,16 +401,35 @@ class OutdoorExecutor(Executor):
             raise RuntimeError("Controller rejected the task arrival tolerance")
 
     async def guided_path(self, guidance, window, position, task_id):
-        path = await super().guided_path(guidance, window, position, task_id)
+        if self.controller_id() != "StairsFollowPath":
+            path = await super().guided_path(guidance, window, position, task_id)
+        else:
+            path = self.stairs_path(guidance, window, position)
         goal = self.tasks.snapshot(task_id)["goal"]
-        if (
-            path
-            and path.poses
-            and window[-1] == len(guidance.points) - 1
-            and "yaw" in goal
-        ):
+        if path and path.poses and window[-1] == len(guidance.points)-1 and "yaw" in goal:
             q = path.poses[-1].pose.orientation
-            q.z, q.w = math.sin(goal["yaw"] / 2), math.cos(goal["yaw"] / 2)
+            q.z, q.w = math.sin(goal["yaw"]/2), math.cos(goal["yaw"]/2)
+        return path
+
+    def stairs_path(self, guidance, window, position):
+        # Stairs follow the measured reference; NavFn must not detour around steps.
+        path = NavPath()
+        path.header.frame_id = "map"
+        path.header.stamp = self.get_clock().now().to_msg()
+        vertices = [position, *(guidance.points[i] for i in window)]
+        points = [position]
+        for a, b in zip(vertices, vertices[1:]):
+            steps = max(1, math.ceil(math.hypot(b['x']-a['x'], b['y']-a['y'])/.1))
+            points.extend({'x':a['x']+(b['x']-a['x'])*i/steps,
+                           'y':a['y']+(b['y']-a['y'])*i/steps} for i in range(1, steps+1))
+        for i, point in enumerate(points):
+            pose = PoseStamped()
+            pose.header = path.header
+            pose.pose.position.x, pose.pose.position.y = float(point["x"]), float(point["y"])
+            a, b = (point, points[i+1]) if i+1 < len(points) else (points[i-1], point)
+            yaw = math.atan2(b["y"]-a["y"], b["x"]-a["x"])
+            pose.pose.orientation.z, pose.pose.orientation.w = math.sin(yaw/2), math.cos(yaw/2)
+            path.poses.append(pose)
         return path
 
 
