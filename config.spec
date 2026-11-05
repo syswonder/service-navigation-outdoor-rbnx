@@ -13,10 +13,13 @@ properties:
         x-provider: robonix/primitive/lidar/lidar3d
       odom:
         type: string
-        x-provider: robonix/primitive/chassis/odom
+        x-provider: robonix/service/localization/odom
+      localization:
+        type: string
+        x-provider: robonix/service/localization/status
   topic_remap:
     type: object
-    description: Absolute ROS topics; explicit values override Atlas. Roles cloud, scan, odom, localization, chassis, tf, tf_static. localization is required explicitly.
+    description: Absolute ROS topics; explicit values override Atlas. Roles cloud, scan, odom, localization, chassis, tf, tf_static. localization is resolved from the selected localization service unless explicitly bound.
   policy:
     type: object
     description: See outdoor_nav/configuration.py DEFAULTS; same field execution thresholds, confirmed calibration/feedback and motion gates. No raw sensor configuration.

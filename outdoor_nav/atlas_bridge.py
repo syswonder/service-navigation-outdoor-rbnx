@@ -25,7 +25,8 @@ manager = RuntimeManager()
 channels = {}
 CONTRACTS = {
     "cloud": "robonix/primitive/lidar/lidar3d",
-    "odom": "robonix/primitive/chassis/odom",
+    "odom": "robonix/service/localization/odom",
+    "localization": "robonix/service/localization/status",
 }
 
 
@@ -37,7 +38,12 @@ def resolve(config):
         found = ATLAS.find_capability(
             contract_id=contract,
             transport="ros2",
-            provider_id=config.get("provider_ids", {}).get(role, ""),
+            provider_id=config.get("provider_ids", {}).get(
+                role,
+                config.get("provider_ids", {}).get("localization", "")
+                if role == "odom"
+                else "",
+            ),
         )
         if not found:
             return None, "Missing provider for " + role

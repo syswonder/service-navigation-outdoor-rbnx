@@ -48,8 +48,8 @@ bash scripts/build.sh
 `params_file` 相对部署 manifest 所在目录解析。`policy` 保留原现场执行策略，确认项默认关闭，不能为让启动通过而随意设为 true。
 
 - `provider_ids.cloud`：提供 `robonix/primitive/lidar/lidar3d` 的前雷达。
-- `provider_ids.odom`：提供 Odometry 的定位 provider；可为 RTK 多普勒+WIT 的输出，不等于物理轮/足里程计。
-- `topic_remap`：显式话题绑定覆盖 Atlas；`localization` 必须显式给出。
+- `provider_ids.localization`：独立定位 service，同一实例提供 `robonix/service/localization/odom` 和 `.../status`；不将定位数据冒充底盘原语。`provider_ids.odom` 仍可单独指定 odom 角色。
+- `topic_remap`：显式话题绑定覆盖 Atlas；显式值覆盖 Atlas；未显式绑定的定位状态与 Odometry 来自所选 localization service。
 - `tf` / `tf_static`：已有 `map→odom→base_link` 动态树和传感器静态外参，服务不另造一套。
 - `global_grid`：`origin: [x,y]`、米制 `width/height`、`resolution`；只决定传感器地图范围，不是静态通行先验。
 - `velocity_output_topic`：默认为非运动 sink；接真实底盘属于后续部署步骤。

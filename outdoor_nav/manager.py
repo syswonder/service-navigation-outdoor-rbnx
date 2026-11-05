@@ -51,6 +51,7 @@ class RuntimeManager:
             import socket
 
             with socket.socket() as probe:
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 probe.bind(("127.0.0.1", runtime.get("http_port", 19975)))
             runtime["run_dir"] = str(run)
             self.runtime = runtime

@@ -8,10 +8,9 @@ service:
       params_file: config/outdoor_nav2.yaml
       provider_ids:
         cloud: front_lidar
-        odom: rtk_wit_localizer
+        localization: localization_outdoor
       topic_remap:
-        localization: /outdoor/localization
-        tf: /outdoor/tf
+        tf: /localization/tf
         tf_static: /tf_static
         chassis: /outdoor/chassis_status
       velocity_output_topic: /robonix/nomotion/outdoor_cmd_vel
