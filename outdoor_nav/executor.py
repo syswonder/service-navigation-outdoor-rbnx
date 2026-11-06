@@ -863,7 +863,5 @@ class Executor(Node):
         if self.http is not None:
             self.http.shutdown()
             self.http.server_close()
-        if self.obstacles is not None:
-            self.obstacles.close()
         self.server.destroy()
         super().destroy_node()
