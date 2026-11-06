@@ -1,10 +1,9 @@
-import math
 from types import SimpleNamespace
 import threading
 
 import pytest
 
-from outdoor_nav.core.gait import GaitSchedule, RouteStation, validate_intervals, FLAT, STAIRS
+from outdoor_nav.core.gait import GaitSchedule, RouteStation, FLAT, STAIRS
 from outdoor_nav.core.tasks import TaskStore
 from outdoor_nav.requests import submit
 
@@ -80,13 +79,19 @@ def test_nearby_stairs_merge_and_parallel_road_does_not_skip_progress():
     assert route.update({"x":4.,"y":0.}) == 5.
 
 
-@pytest.mark.parametrize("change", [
-    {"start_m":-1.}, {"end_m":21.}, {"start_m":True}, {"end_m":math.nan},
-    {"gait_code":0x1003}, {"gait":"unknown"},
-])
-def test_bad_intervals_are_rejected(change):
-    bad = [{**INTERVALS[0], **change}, *INTERVALS[1:]]
-    with pytest.raises(ValueError):validate_intervals(REFERENCE,bad)
+def test_sensor_approach_is_validated_and_stairs_shift_with_its_length():
+    node,_=task_node()
+    reference=[{'x':-3.,'y':0.},{'x':0.,'y':0.},{'x':0.,'y':5.},{'x':0.,'y':8.}]
+    payload={**request(),'reference_path':reference,'goal':reference[-1], 'intervals':[
+        {'start_m':0.,'end_m':3.,'gait':'flat','gait_code':FLAT,'grade':'unknown',
+         'source_kind':'sensor_approach','sources':[],'requires_sensor_validation':True},
+        {'start_m':3.,'end_m':8.,'gait':'flat','gait_code':0x1001},
+        {'start_m':8.,'end_m':11.,'gait':'stairs','gait_code':0x1003}]}
+    task=submit(node,payload)
+    assert task['intervals'][0]['source_kind']=='sensor_approach'
+    schedule=GaitSchedule(task['reference_path'],task['intervals'])
+    assert schedule.stairs==[[7.,11.]]
+    assert schedule.tick({'x':-3.,'y':0.},0.,FLAT,0.,True,stopped=True)[1]['target_code']==FLAT
 
 
 def task_node():

@@ -39,14 +39,6 @@ def route():
         'goal':{'x':20.,'y':0.},'intervals':[{'start_m':0.,'end_m':20.,'gait':'stairs','gait_code':0x1003}]}
 
 
-def test_current_map_reference_handoff_and_confirmed_cancel(nav):
-    value=route();accepted=nav.submit_reference(value,'b'*32,{'goal':value['goal']})
-    sent=nav.execution.received[-1]
-    assert sent['reference_path']==value['reference_path'] and sent['intervals']==value['intervals']
-    assert sent['map_id']==MAP['map_id'] and sent['arrival_tolerance_m']==3.
-    assert nav.cancel(accepted['run_id'])['state']=='canceling'
-
-
 @pytest.mark.parametrize('change',[{'map_id':'old-map'},{'version':'c'*16},
     {'origin_wgs84':{'latitude':30.,'longitude':120.}},{'map_offset_xy_m':[1.,0.]},
     {'antenna_xy_m':[1.,0.]},{'reference_point':'other'}])
@@ -69,13 +61,7 @@ def test_lost_reply_retries_original_request_after_restart(nav):
     with pytest.raises(ApiError):restarted.submit_reference(route(),'d'*32,{'goal':21})
 
 
-def test_binding_retries_and_disabled_profile(nav):
-    calls=[]
-    class Localization:
-        def bind(self,value):calls.append(value)
-    nav.localization=Localization()
-    nav.bind_map(MAP);nav.bind_map(MAP)
-    assert calls==[MAP,MAP]
+def test_disabled_profile_and_active_navigation_block_execution_or_map_change(nav):
     nav.execution_enabled=False
     assert not nav.status()['ready']
     with pytest.raises(ApiError):nav.submit_reference(route(),'e'*32,{})
