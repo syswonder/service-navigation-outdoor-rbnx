@@ -33,6 +33,8 @@ CONTRACTS = {
 def resolve(config):
     config = {**config, "topic_remap": dict(config.get("topic_remap", {}))}
     for role, contract in CONTRACTS.items():
+        if role == "cloud" and not config.get("policy", {}).get("lidar_enabled", True):
+            continue
         if role in config["topic_remap"]:
             continue
         found = ATLAS.find_capability(

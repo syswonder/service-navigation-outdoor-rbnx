@@ -1,0 +1,5 @@
+<library path="outdoor_camera_layer">
+  <class name="outdoor_camera_layer::CameraLayer" type="outdoor_camera_layer::CameraLayer" base_class_type="nav2_costmap_2d::Layer">
+    <description>Maximum merge of fresh camera cost grids; camera unknown cells never clear lidar.</description>
+  </class>
+</library>

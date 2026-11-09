@@ -1,3 +1,5 @@
+# Copy into the robot deploy repository. This complete file owns Nav2 behavior.
+# The wrapper only binds topic tokens and selects the enabled sensor layers.
 planner_server:
   ros__parameters:
     use_sim_time: false
@@ -9,11 +11,11 @@ planner_server:
 controller_server:
   ros__parameters:
     use_sim_time: false
-    odom_topic: /outdoor/odom
+    odom_topic: "__ROBONIX_ODOM_TOPIC__"
     controller_frequency: 10.0
     progress_checker_plugin: progress_checker
     goal_checker_plugins: [goal_checker]
-    controller_plugins: [FollowPath]
+    controller_plugins: [FollowPath, StairsFollowPath]
     progress_checker:
       plugin: nav2_controller::SimpleProgressChecker
       required_movement_radius: 0.10
@@ -46,7 +48,7 @@ controller_server:
       linear_granularity: 0.05
       angular_granularity: 0.05
       transform_tolerance: 0.2
-      trans_stopped_velocity: 0.01
+      trans_stopped_velocity: 0.03
       xy_goal_tolerance: 0.50
       short_circuit_trajectory_evaluation: true
       critics: [RotateToGoal, Oscillation, BaseObstacle, GoalAlign, PathAlign, PathDist, GoalDist]
@@ -59,6 +61,22 @@ controller_server:
       RotateToGoal.xy_goal_tolerance: 0.50
       RotateToGoal.slowing_factor: 1.0
       RotateToGoal.lookahead_time: 0.5
+    StairsFollowPath:
+      plugin: nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController
+      desired_linear_vel: 0.15
+      lookahead_dist: 0.5
+      min_lookahead_dist: 0.25
+      max_lookahead_dist: 0.6
+      use_velocity_scaled_lookahead_dist: false
+      rotate_to_heading_angular_vel: 0.2
+      use_rotate_to_heading: true
+      allow_reversing: false
+      max_angular_accel: 0.6
+      transform_tolerance: 0.2
+      use_collision_detection: false
+      use_cost_regulated_linear_velocity_scaling: false
+      use_regulated_linear_velocity_scaling: true
+      min_approach_linear_velocity: 0.05
 velocity_smoother:
   ros__parameters:
     use_sim_time: false
@@ -68,5 +86,87 @@ velocity_smoother:
     min_velocity: [0.0, 0.0, -0.4]
     max_accel: [0.3, 0.0, 0.6]
     max_decel: [-0.3, 0.0, -0.6]
-    velocity_timeout: 0.3
-    odom_topic: /outdoor/odom
+    velocity_timeout: 0.5
+    odom_topic: "__ROBONIX_ODOM_TOPIC__"
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      use_sim_time: false
+      global_frame: map
+      robot_base_frame: base_link
+      rolling_window: false
+      track_unknown_space: true
+      update_frequency: 2.0
+      publish_frequency: 2.0
+      always_send_full_costmap: true
+      transform_tolerance: 0.2
+      resolution: 0.1
+      robot_radius: 0.6
+      width: 200
+      height: 200
+      origin_x: -100.0
+      origin_y: -100.0
+      plugins: [lidar_layer, camera_layer, inflation_layer]
+      lidar_layer:
+        plugin: nav2_costmap_2d::ObstacleLayer
+        enabled: true
+        combination_method: 1
+        observation_sources: scan
+        scan:
+          topic: "__ROBONIX_SCAN_TOPIC__"
+          data_type: LaserScan
+          marking: true
+          clearing: true
+          inf_is_valid: true
+          obstacle_max_range: 6.0
+          raytrace_max_range: 8.0
+      camera_layer:
+        plugin: outdoor_camera_layer::CameraLayer
+        enabled: true
+        grid_topic: "__ROBONIX_CAMERA_COSTMAP_TOPIC__"
+        max_age_s: 1.0
+      inflation_layer:
+        plugin: nav2_costmap_2d::InflationLayer
+        inflation_radius: 0.7
+        cost_scaling_factor: 5.0
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      use_sim_time: false
+      global_frame: odom
+      robot_base_frame: base_link
+      rolling_window: true
+      track_unknown_space: true
+      update_frequency: 5.0
+      publish_frequency: 5.0
+      always_send_full_costmap: true
+      transform_tolerance: 0.2
+      resolution: 0.1
+      robot_radius: 0.6
+      width: 8
+      height: 8
+      plugins: [lidar_layer, camera_layer, inflation_layer]
+      lidar_layer:
+        plugin: nav2_costmap_2d::ObstacleLayer
+        enabled: true
+        combination_method: 1
+        observation_sources: scan
+        scan:
+          topic: "__ROBONIX_SCAN_TOPIC__"
+          data_type: LaserScan
+          marking: true
+          clearing: true
+          inf_is_valid: true
+          obstacle_max_range: 6.0
+          raytrace_max_range: 8.0
+      camera_layer:
+        plugin: outdoor_camera_layer::CameraLayer
+        enabled: true
+        grid_topic: "__ROBONIX_CAMERA_COSTMAP_TOPIC__"
+        max_age_s: 1.0
+      inflation_layer:
+        plugin: nav2_costmap_2d::InflationLayer
+        inflation_radius: 0.7
+        cost_scaling_factor: 5.0

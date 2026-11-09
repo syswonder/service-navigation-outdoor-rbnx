@@ -2,7 +2,7 @@
 service:
   - name: outdoor_execution
     url: https://github.com/syswonder/service-navigation-outdoor-rbnx
-    branch: main
+    branch: feat/vision-multisensor-navigation
     manifest: package_manifest.jetson-native.yaml
     config:
       params_file: config/outdoor_nav2.yaml
@@ -10,11 +10,28 @@ service:
         cloud: front_lidar
         localization: localization_outdoor
       topic_remap:
+        camera_rgb: /camera_gemini330/color/image_raw
+        camera_depth: /camera_gemini330/depth/image_raw
+        camera_depth_info: /camera_gemini330/depth/camera_info
+        camera_color_info: /camera_gemini330/color/camera_info
         tf: /localization/tf
         tf_static: /tf_static
         chassis: /outdoor/chassis_status
       velocity_output_topic: /robonix/nomotion/outdoor_cmd_vel
+      # Nav2 controller/costmap/footprint/inflation tuning is in params_file.
+      scan_projection:
+        target_frame: base_link
+        min_height_m: -0.3
+        max_height_m: 0.3
+        range_min_m: 0.5
+        range_max_m: 8.0
+        transform_tolerance_s: 0.2
       policy:
+        lidar_enabled: true
+        camera_enabled: false
+        camera_frame_confirmed: false
+        pidnet_enabled: true
+        camera_expected_ground_z_m: -0.18
         motion_enabled: false
         # Set calibration/feedback confirmations only after measuring them.
         require_chassis_ready: true

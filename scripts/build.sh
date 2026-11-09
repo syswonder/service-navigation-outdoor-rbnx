@@ -10,7 +10,14 @@ set +u; source "/opt/ros/${ROS_DISTRO:-humble}/setup.bash"; set -u
 for package in nav2_planner nav2_controller nav2_regulated_pure_pursuit_controller nav2_velocity_smoother nav2_lifecycle_manager pointcloud_to_laserscan; do
   ros2 pkg prefix "$package" >/dev/null || { echo "Missing ROS package: $package" >&2; exit 2; }
 done
-"$PY" -c 'import numpy, yaml, PIL, rclpy, robonix_api'
+export PYTHONPATH="$(rbnx path robonix-api):${PYTHONPATH:-}"
+"$PY" -c 'import numpy, yaml, PIL, rclpy, robonix_api, sensor_msgs_py, tf2_ros'
+ros2 pkg prefix rtabmap_util >/dev/null
+"$PY" -c 'import scipy, shapely, cv2, message_filters'
+mkdir -p "$PKG/rbnx-build/camera_ws"
+cd "$PKG/rbnx-build/camera_ws"
+colcon build --base-paths "$PKG/src/outdoor_camera_layer" --packages-select outdoor_camera_layer
+cd "$PKG"
 "$PY" -m compileall -q outdoor_nav
 mkdir -p rbnx-build
 touch rbnx-build/.rbnx-built

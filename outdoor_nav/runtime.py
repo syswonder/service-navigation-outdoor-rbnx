@@ -104,6 +104,7 @@ class OutdoorExecutor(Executor):
             (String, "/outdoor/command_status", self.on_guard, 10),
             (String, "/outdoor/chassis_status", self.on_chassis, 10),
             (LaserScan, "/outdoor/scan", self.on_scan, qos_profile_sensor_data),
+            (LaserScan, "/outdoor/camera_scan", self.on_camera_scan, qos_profile_sensor_data),
         ):
             self.create_subscription(kind, name, callback, qos)
         self.server = ActionServer(
@@ -253,6 +254,14 @@ class OutdoorExecutor(Executor):
         ):
             self.mark("lidar")
 
+    def on_camera_scan(self, msg):
+        if not msg.header.frame_id:
+            self.stats["camera"] = -math.inf
+            return
+        if healthy_scan(msg, self.get_clock().now().nanoseconds / 1e9,
+                        self.config["sensor_timeout_s"], allow_filtered_empty=True):
+            self.mark("camera")
+
     def status(self, include_task=True):
         now = time.monotonic()
         c = self.config
@@ -266,6 +275,8 @@ class OutdoorExecutor(Executor):
             k: now - self.stats.get(k, -math.inf) < limit
             for k, limit in (("lidar", t), ("global_map", 3), ("local_map", t))
         }
+        health["lidar"] = not c.get("lidar_enabled", True) or health["lidar"]
+        health["camera"] = not c.get("camera_enabled", False) or now-self.stats.get("camera", -math.inf) < t
         health.update(
             localization=bool(g.get("ready"))
             and now - self.geo_at < t
@@ -283,9 +294,9 @@ class OutdoorExecutor(Executor):
                     "calibrated",
                     "antenna_offset_confirmed",
                     "footprint_confirmed",
-                    "cloud_frame_confirmed",
                 )
-            ),
+            ) and (not c.get("lidar_enabled", True) or c["cloud_frame_confirmed"])
+              and (not c.get("camera_enabled", False) or c["camera_frame_confirmed"]),
             motion_enabled=c["motion_enabled"],
             chassis=not c["require_chassis_ready"]
             or (self.chassis.get("ready") is True and now - self.chassis_at < t),

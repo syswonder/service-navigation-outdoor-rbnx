@@ -4,7 +4,10 @@ PKG="${RBNX_PACKAGE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 cd "$PKG"
 PY="${OUTDOOR_SERVICE_PYTHON:-python3}"
 set +u; source "/opt/ros/${ROS_DISTRO:-humble}/setup.bash"; set -u
-export PYTHONPATH="$PKG:$PKG/rbnx-build/codegen/proto_gen:$PKG/rbnx-build/codegen/robonix_mcp_types:$(rbnx path robonix-api):${PYTHONPATH:-}"
+if [[ -f "$PKG/rbnx-build/camera_ws/install/local_setup.bash" ]]; then
+    set +u; source "$PKG/rbnx-build/camera_ws/install/local_setup.bash"; set -u
+fi
+export PYTHONPATH="$PKG/vendor:$PKG:$PKG/rbnx-build/codegen/proto_gen:$PKG/rbnx-build/codegen/robonix_mcp_types:$(rbnx path robonix-api):${PYTHONPATH:-}"
 # The bridge starts workers only at Driver INIT. No hardware activation here.
 mkdir -p rbnx-build
 exec 9>rbnx-build/bridge.lock

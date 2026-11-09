@@ -1,5 +1,69 @@
 # Outdoor navigation service for Robonix
 
+此视觉版本位于 `feat/vision-multisensor-navigation` 分支，包含原 RGB-D / RTAB-Map / PIDNet 链路及检测后稳定性过滤。现有使用者可继续使用 `main`；采用视觉版本时，在部署 manifest 中显式选择此分支，并按下文安装视觉依赖、配置完整 Nav2 参数。
+
+## 部署参数约定
+
+完整 Nav2 参数由机器人部署的 `params_file` 拥有，服务只绑定话题占位符并裁剪关闭的传感器层，
+不再用启动代码覆盖速度、足迹、膨胀、地图尺寸或插入控制器。
+雷达投影放在 `scan_projection`，原视觉检测/稳定过滤及执行确认项保留在 `policy`。
+字段、单位和旧配置迁移见 [配置说明](docs/CONFIGURATION.md) 与 `config.spec`。
+实际生效配置写入运行目录的 `effective_nav2.yaml`。
+
+## 原视觉链路与检测后过滤
+
+相机链路沿用 xiangruicheng 当前 geometry_assisted/rtabmap 实现：
+配准 RGB/深度/CameraInfo 检查 -> 原地面参考估计 -> RTAB-Map 法向量/聚类 ->
+原离地 0.10m 正障碍及负障碍复核 -> visual_obstacles + observed_ground + depth_status。
+PIDNet-M -> road/sidewalk 掩码（置信度 0.7）-> 原语义投影，作为辅助偏好。
+原检测源码按文件保留在 vendor/，没有使用先前的固定高度裁切替代检测器。
+
+新增过滤只位于原检测输出之后。先按同一采集时刻配对障碍、地面和有效状态，
+再在连续 odom 中按位置关联、累计命中/持续时间筛选稳定正障碍；
+已测得的负障碍直接保留。重复帧不累计，失效证书立即撤销相机就绪并清空本层图。
+地面覆盖继续使用原 observed_ground_region，四个角都需接近实际地面点；
+不以激光式射线或未知深度制造地面自由空间。
+
+PIDNet 仍只在几何已知自由区域叠加非道路软代价 40，不覆盖物理障碍或未知。
+相机本层使用原 build_costmap，再由随包编译的 CameraLayer 与雷达独立层取最大值合并；
+未知相机单元不修改雷达，旧相机标记在本帧/超时后退休。最后由 Nav2 统一执行规划控制。
+
+policy.lidar_enabled / camera_enabled 分别选择仅雷达、仅相机或两者。
+相机打开时默认 pidnet_enabled=true，需配置 pidnet_weights（原 PIDNet-M checkpoint）
+或 PIDNET_WEIGHTS。可显式关闭语义推理，原 RTAB-Map 几何仍运行。
+PIDNet/语义投影运行时失败按原链路降级为几何；深度/RTAB-Map/过滤失效则阻断相机就绪。
+权重不复制到仓库；包内驱动和模型源码独立于旧工作空间。
+
+```yaml
+pidnet_weights: assets/PIDNet_M_Cityscapes_test.pt
+policy:
+  lidar_enabled: true
+  camera_enabled: true
+  camera_frame_confirmed: false # 必须实测确认配准和外参
+  pidnet_enabled: true
+  camera_expected_ground_z_m: -0.18
+  camera_ground_tolerance_m: 0.05
+  camera_static_min_hits: 4
+  camera_static_dwell_s: 0.6
+  camera_static_gap_s: 0.35
+  camera_static_cell_m: 0.15
+  camera_static_drift_m: 0.12
+topic_remap:
+  camera_rgb: /camera_gemini330/color/image_raw
+  camera_depth: /camera_gemini330/depth/image_raw
+  camera_depth_info: /camera_gemini330/depth/camera_info
+  camera_color_info: /camera_gemini330/color/camera_info
+```
+
+需安装原链路依赖 RTAB-Map、SciPy、Shapely 2、OpenCV、message_filters 和兼容 PyTorch。
+build.sh 会编译相机适配插件，start.sh 会加载包内 overlay。
+相机原检测输出固定使用原 live-domain guard 所要求的 outdoor observation 端点。
+关闭的传感器不参与依赖发现和健康门控；定位包不增加视觉里程计。
+
+稳定性仍是可配置的时间/位置判据，不能保证识别所有运动物体；
+短暂停止、慢速运动、簇合并或遮挡可能误判。现场过滤阈值须验收。
+旧“高度裁切 + 二维扫描”方案和相应测试已撤下，不能再把其验证结果当作本链路验收。
+
 把 outdoorNav 的 **Nav2 执行与避障链**封装为 Robonix service，支持外部提供的整条参考路线，不重新实现道路业务规划。
 
 ```text
@@ -22,8 +86,8 @@
 - `outdoor_nav/runtime.py`、`executor.py`：唯一执行 owner、滚动窗口、停车确认和状态。
 - `outdoor_nav/guard.py`：独立速度/扫描/定位看门狗，保留原链路的失效归零。
 - `outdoor_nav/service.launch.py`：仅启动投影、执行器、守卫及 Nav2；不启动外部传感器与定位。
-- `tests/`：冻结算法对照、参数/请求/生命周期、Scene/gRPC 接入和隔离 Nav2 楼梯测试。
-- `docs/upstream-snapshot.json`：被提取源码的 SHA-256；`tests/upstream_executor.py.txt` 是只用于对比的冻结参照。
+- `docs/CONFIGURATION.md`、`docs/upstream-snapshot.json`：配置说明与源码来源记录。
+- `local_only/`：本地测试、验证报告、备份与机器专用配置，由 `.gitignore` 排除，不随仓库分发。
 
 参考服务结构：[syswonder/service-navigation-rbnx](https://github.com/syswonder/service-navigation-rbnx)。不直接复制其室内静态地图依赖、控制器插件、停止脚本或传感器默认参数。
 
@@ -39,7 +103,7 @@ bash scripts/build.sh
 
 启动解释器需安装 `robonix-api` 与本包 `[robonix]` 可选依赖，固定 `mcp>=1.27,<2.0.dev0` 和 `fastmcp>=3,<4`，避免 SDK 的 v1 FastMCP 接口被 mcp 2.x 替换；可用 `OUTDOOR_SERVICE_PYTHON` 指定 ROS-compatible Python/venv。
 
-构建只生成 gRPC/MCP bindings，**不生成 ROS IDL overlay**。将 `config/deployment.example.yaml` 条目复制到机器人部署仓库；将 `config/nav2_params.example.yml` 复制为部署侧 `config/outdoor_nav2.yaml` 并检查部署参数，再通过该部署 manifest 的 `rbnx build` / `rbnx boot` 启动。不要直接使用占位 provider 名称当作现成部署。
+构建生成 gRPC/MCP bindings 和相机 costmap 插件 overlay，**不生成 Robonix ROS IDL overlay**。将 `config/deployment.example.yaml` 条目复制到机器人部署仓库；将完整的 `config/nav2_params.example.yml` 复制为部署侧 `config/outdoor_nav2.yaml` 并检查部署参数，再通过该部署 manifest 的 `rbnx build` / `rbnx boot` 启动。不要直接使用占位 provider 名称当作现成部署。
 
 `start.sh` 只起 bridge；Driver INIT 才绑定依赖并起执行进程。外部反馈尚未就绪时不接受运动任务，activate 不能绕过健康门控。deactivate 与 stop 等待新鲜的速度反馈确认停车；服务停机只回收本实例进程组，不按通用 Nav2 进程名清理。
 
@@ -51,7 +115,8 @@ bash scripts/build.sh
 - `provider_ids.localization`：独立定位 service，同一实例提供 `robonix/service/localization/odom` 和 `.../status`；不将定位数据冒充底盘原语。`provider_ids.odom` 仍可单独指定 odom 角色。
 - `topic_remap`：显式话题绑定覆盖 Atlas；显式值覆盖 Atlas；未显式绑定的定位状态与 Odometry 来自所选 localization service。
 - `tf` / `tf_static`：已有 `map→odom→base_link` 动态树和传感器静态外参，服务不另造一套。
-- `global_grid`：`origin: [x,y]`、米制 `width/height`、`resolution`；只决定传感器地图范围，不是静态通行先验。
+- `scan_projection`：雷达投影高度、距离和 TF 容差；相机使用原检测链路。
+- 地图尺寸、足迹、分辨率及各层参数直接写在部署 Nav2 YAML 中；旧 `global_grid` 只做有警告的兼容迁移。
 - `velocity_output_topic`：默认为非运动 sink；接真实底盘属于后续部署步骤。
 
 ### 定位就绪 JSON
@@ -102,7 +167,7 @@ bash scripts/build.sh
 
 所有楼梯区段及上述缓冲使用 `StairsFollowPath` 沿参考线跟踪，暂停局部碰撞检查及 NavFn 绕行；平地切回原 DWB 和避障。需要安装 `nav2_regulated_pure_pursuit_controller`。保留急停、底盘状态、传感器新鲜度、定位断流及停车确认。默认到点容差仍为 3 米。
 
-只请求 gait，不调用 posture、站起或使用模式切换。外部姿态指令改变步态时会停车重新确认。1 米缓冲不保证覆盖定位误差；本轮未验证真实上下楼梯。隔离真实 Nav2 测试入口：`tests/stairs_smoke.py`（仅域 188，虚拟传感器及命令出口）。
+只请求 gait，不调用 posture、站起或使用模式切换。外部姿态指令改变步态时会停车重新确认。1 米缓冲不保证覆盖定位误差；本轮未验证真实上下楼梯。本地保留的隔离测试见 `local_only/README.md`。
 
 ## Scene 接入
 
@@ -110,11 +175,6 @@ Scene 使用本包的 `outdoor_nav.scene.SceneNavigation`，只接收当前建�
 
 导航请求记录最多保留 1024 个，每个最多 2 MiB；达到上限时拒绝新请求并提示归档，不静默删除幂等重试记录。旧网页地图/规划/障碍注入入口已从导航进程移除。
 
-## 测试
+## 本地验证材料
 
-```bash
-source /opt/ros/humble/setup.bash
-PYTHONPATH=. python3 -m pytest -q
-```
-
-独立回归不需要原工程或校园资源。`tests/test_scene.py` 与 `test_scene_wire.py` 验证新地图身份、步态区段、幂等重试和真实 gRPC；`tests/stairs_smoke.py` 在隔离域 188 使用真实 Nav2 和虚拟传感器验证空地图启动、步态确认、楼梯避障暂停/恢复及超时停车。历史算法冻结快照仅用于回归来源对照，不在运行路径中。
+测试脚本和验证报告集中保存在 `local_only/`，运行方法见该目录的 `README.md`。该目录不提交 Git，新克隆仓库不包含这些材料。部署用配置示例保留在 `config/`；机器专用配置可放在 `local_only/config/`，并在部署中显式引用对应路径。

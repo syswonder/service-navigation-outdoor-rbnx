@@ -7,7 +7,7 @@ name = "service-navigation-outdoor-rbnx"
 version = "0.1.0"
 description = "Reference-route execution and obstacle avoidance service for Robonix"
 requires-python = ">=3.10"
-dependencies = ["numpy<2", "PyYAML>=6", "Pillow>=9"]
+dependencies = ["numpy<2", "PyYAML>=6", "Pillow>=9", "scipy>=1.8", "shapely>=2,<3"]
 
 [project.optional-dependencies]
 robonix = ["mcp>=1.27,<2.0.dev0", "fastmcp>=3,<4"]
@@ -17,6 +17,3 @@ include = ["outdoor_nav*"]
 
 [tool.setuptools.package-data]
 outdoor_nav = ["*.launch.py"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]

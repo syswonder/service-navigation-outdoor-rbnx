@@ -1,0 +1,90 @@
+{
+  "semantic_local_grid\\obstacle_node.py": {
+    "source": "navigation_ws/src/semantic_local_grid/semantic_local_grid/obstacle_node.py",
+    "sha256": "741bac67e5ec7b1c995f30429f4f63a7f94db69d3f044f6845f67a85f995d983"
+  },
+  "semantic_local_grid\\completion.py": {
+    "source": "navigation_ws/src/semantic_local_grid/semantic_local_grid/completion.py",
+    "sha256": "9b62f6805c35f64322795d4d3465fa8a3b546c5ca662a0b7a63f8f089d761fa3"
+  },
+  "semantic_local_grid\\ros_utils.py": {
+    "source": "navigation_ws/src/semantic_local_grid/semantic_local_grid/ros_utils.py",
+    "sha256": "2221795957c586110edf33ddedbae55702f4c6268bbe6db63d357e72078449bb"
+  },
+  "semantic_local_grid\\projection_node.py": {
+    "source": "navigation_ws/src/semantic_local_grid/semantic_local_grid/projection_node.py",
+    "sha256": "d92ade6ffafb05c0527d78254a45fa888f772e8de3c52526fea700de27008531"
+  },
+  "semantic_local_grid\\obstacle_geometry.py": {
+    "source": "navigation_ws/src/semantic_local_grid/semantic_local_grid/obstacle_geometry.py",
+    "sha256": "04b51572755dd9eb49c5f6a9b9ba595ae0f5873871b877dd5ede478e24979e82"
+  },
+  "semantic_local_grid\\pidnet_node.py": {
+    "source": "navigation_ws/src/semantic_local_grid/semantic_local_grid/pidnet_node.py",
+    "sha256": "57b7eb2647fa9db24e5a8acdd2419a6dd7266f8ecb4aab4f3216741b1f71a321"
+  },
+  "semantic_local_grid\\pidnet_vendor\\model_utils.py": {
+    "source": "navigation_ws/src/semantic_local_grid/semantic_local_grid/pidnet_vendor/model_utils.py",
+    "sha256": "8817f6367b4c9d094b35cd606926f2937cef98469fff888e3773c1c95ca969aa"
+  },
+  "semantic_local_grid\\pidnet_vendor\\pidnet.py": {
+    "source": "navigation_ws/src/semantic_local_grid/semantic_local_grid/pidnet_vendor/pidnet.py",
+    "sha256": "1692ebc05ea4cc7096abd0b9a2e7e79543d878955af1a9d3d60e7973d6eb623d"
+  },
+  "semantic_local_grid\\pidnet_vendor\\__init__.py": {
+    "source": "navigation_ws/src/semantic_local_grid/semantic_local_grid/pidnet_vendor/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "semantic_local_grid\\geometry.py": {
+    "source": "navigation_ws/src/semantic_local_grid/semantic_local_grid/geometry.py",
+    "sha256": "1b9e4ccac84a97f619efab1116fbd2899150e7dbca40cc2e42cc871af7c0293d"
+  },
+  "semantic_local_grid\\__init__.py": {
+    "source": "navigation_ws/src/semantic_local_grid/semantic_local_grid/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "semantic_local_grid\\inference.py": {
+    "source": "navigation_ws/src/semantic_local_grid/semantic_local_grid/inference.py",
+    "sha256": "5ba6f68e19eb92b0c7fd4ce3867882ac5d7ca5d4b7185ebbbe4c7d1b23bafb6f"
+  },
+  "semantic_local_grid\\fusion_node.py": {
+    "source": "navigation_ws/src/semantic_local_grid/semantic_local_grid/fusion_node.py",
+    "sha256": "49547afc6ec3cee2f48ef67bbfe7133aae195dbaffc3a1402b2b99e6937a0d73"
+  },
+  "semantic_local_grid\\navigation_pose.py": {
+    "source": "navigation_ws/src/semantic_local_grid/semantic_local_grid/navigation_pose.py",
+    "sha256": "d6ff6289bd1027f132957b17da1bd601e06bdb9b6956c20eec0b80ec26ff7665"
+  },
+  "sensor_sanity_checker\\__init__.py": {
+    "source": "navigation_ws/src/sensor_sanity_checker/sensor_sanity_checker/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "sensor_sanity_checker\\images.py": {
+    "source": "navigation_ws/src/sensor_sanity_checker/sensor_sanity_checker/images.py",
+    "sha256": "e6f83c5c6a4998fc0e616e40f8aa965b024fd292438a3f6c91e1f1ae8971bd70"
+  },
+  "semantic_direct_navigation\\core.py": {
+    "source": "navigation_ws/src/semantic_direct_navigation/semantic_direct_navigation/core.py",
+    "sha256": "c4b1132c77fd5e27c4a6e4505376b1547453c9548d7e2c788d162a1db72787b3"
+  },
+  "semantic_direct_navigation\\rtabmap_backend.py": {
+    "source": "navigation_ws/src/semantic_direct_navigation/semantic_direct_navigation/rtabmap_backend.py",
+    "sha256": "763886ee7559890ce090112075d82af30faf394afc3a9437b98a99f07209f13a"
+  },
+  "semantic_direct_navigation\\__init__.py": {
+    "source": "navigation_ws/src/semantic_direct_navigation/semantic_direct_navigation/__init__.py",
+    "sha256": "7fa4edd28c8519cb0acf0607a07637e8ee40b4ab431ed37aa92fa0388fcb5d9e"
+  },
+  "semantic_direct_navigation\\depth_node.py": {
+    "source": "navigation_ws/src/semantic_direct_navigation/semantic_direct_navigation/depth_node.py",
+    "sha256": "c7577ce79947ce69d0d9a5a5699bd98c82c7110c70d6e31c0600510458d9bd59"
+  },
+  "semantic_direct_navigation\\geometric_perception.py": {
+    "source": "navigation_ws/src/semantic_direct_navigation/semantic_direct_navigation/geometric_perception.py",
+    "sha256": "c41aac62d6bb3734bb9cebc32a5ad6d82943f29dc980c8a7448c84c395cdd56b"
+  },
+  "semantic_direct_navigation\\costmap.py": {
+    "source": "navigation_ws/src/semantic_direct_navigation/semantic_direct_navigation/costmap.py",
+    "sha256": "7546a626000f2d85eacc58895ae52accb025e7e1e8b5aec128c3b9e02c1fca52"
+  }
+}

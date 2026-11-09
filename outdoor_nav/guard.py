@@ -30,6 +30,7 @@ class Watchdog(Node):
             0.0,
         )
         self.ready = False
+        self.camera_at = 0.0
         self.conflict = False
         self.pub = self.create_publisher(
             Twist, "/outdoor/diagnostic_cmd_vel" if self.diagnostic else "/cmd_vel", 10
@@ -41,6 +42,7 @@ class Watchdog(Node):
             LaserScan, "/outdoor/scan", self.scan, qos_profile_sensor_data
         )
         self.create_timer(0.05, self.tick)
+        self.create_subscription(LaserScan, "/outdoor/camera_scan", self.camera_scan, qos_profile_sensor_data)
         self.create_timer(1.0, self.check_owners)
 
     def check_owners(self):
@@ -81,7 +83,8 @@ class Watchdog(Node):
             "motion_disabled": self.config["motion_enabled"],
             "localization_unready": self.ready,
             "localization_stale": now - self.geo_at < self.config["sensor_timeout_s"],
-            "scan_stale": now - self.scan_at < self.config["sensor_timeout_s"],
+            "scan_stale": not self.config.get("lidar_enabled", True) or now - self.scan_at < self.config["sensor_timeout_s"],
+            "camera_stale": not self.config.get("camera_enabled", False) or now-getattr(self, "camera_at", 0) < self.config["sensor_timeout_s"],
             "command_stale": now - self.command_at < self.config["command_timeout_s"],
         }
         blockers = [reason for reason, passed in checks.items() if not passed]
@@ -113,6 +116,14 @@ class Watchdog(Node):
                 )
             )
         )
+
+    def camera_scan(self, msg):
+        if not msg.header.frame_id:
+            self.camera_at = -math.inf
+            return
+        if healthy_scan(msg, self.get_clock().now().nanoseconds / 1e9,
+                        self.config["sensor_timeout_s"], allow_filtered_empty=True):
+            self.camera_at = time.monotonic()
 
     def destroy_node(self):
         if rclpy.ok():

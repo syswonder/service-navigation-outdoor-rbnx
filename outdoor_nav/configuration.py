@@ -6,7 +6,22 @@ import os
 from pathlib import Path
 import re
 
+from .nav2_parameters import prepare, projection_config
+
 DEFAULTS = {
+    "lidar_enabled": True,
+    "camera_enabled": False,
+    "camera_frame_confirmed": False,
+    "pidnet_enabled": True,
+    "camera_expected_ground_z_m": -0.18,
+    "camera_ground_tolerance_m": 0.05,
+    "camera_ground_z_min_m": -0.45,
+    "camera_ground_z_max_m": 0.15,
+    "camera_static_min_hits": 4,
+    "camera_static_dwell_s": 0.6,
+    "camera_static_gap_s": 0.35,
+    "camera_static_cell_m": 0.15,
+    "camera_static_drift_m": 0.12,
     "sensor_timeout_s": 1.0,
     "command_timeout_s": 0.5,
     "navigation_recovery_timeout_s": 15.0,
@@ -43,6 +58,16 @@ DEFAULTS = {
     "heading_source": "wit_imu",
 }
 TOPICS = {
+    "camera_rgb": "/camera_gemini330/color/image_raw",
+    "camera_depth": "/camera_gemini330/depth/image_raw",
+    "camera_depth_info": "/camera_gemini330/depth/camera_info",
+    "camera_color_info": "/camera_gemini330/color/camera_info",
+    "camera_obstacles": "/outdoor/direct_nav/visual_obstacles",
+    "camera_ground": "/outdoor/direct_nav/observed_ground",
+    "camera_status": "/outdoor/direct_nav/depth_status",
+    "camera_semantics": "/outdoor/vision/current_grid",
+    "camera_costmap": "/outdoor/vision/filtered_costmap",
+    "camera_scan": "/outdoor/camera_scan",
     "cloud": "/airy_201/points",
     "scan": "/outdoor/scan",
     "odom": "/outdoor/odom",
@@ -64,8 +89,31 @@ def topic(value):
 def validate(config, base=None):
     if not isinstance(config, dict):
         raise ValueError("Service config must be an object")
-    base = Path(base or os.environ.get("RBNX_INVOCATION_CWD", ".")).resolve()
-    path = Path(config.get("params_file", ""))
+    allowed = {"params_file", "provider_ids", "topic_remap", "pidnet_weights", "pidnet_device",
+               "policy", "scan_projection", "velocity_output_topic", "gait_switching_enabled",
+               "gait_output_topic", "global_grid", "run_dir", "http_port", "action_wait_s", "worker_python"}
+    if set(config) - allowed:
+        raise ValueError("Unknown service config fields: " + str(sorted(set(config) - allowed)))
+    for field in ("policy", "topic_remap", "provider_ids"):
+        if not isinstance(config.get(field, {}), dict):
+            raise ValueError(field + " must be a mapping")
+    providers = config.get("provider_ids", {})
+    if set(providers) - {"cloud", "odom", "localization", "chassis"} or any(not isinstance(v, str) for v in providers.values()):
+        raise ValueError("Unknown provider role or non-string provider id")
+    if type(config.get("http_port", 19975)) is not int or not 1024 <= config.get("http_port", 19975) <= 65535:
+        raise ValueError("http_port must be an integer in [1024, 65535]")
+    wait = config.get("action_wait_s", 45.)
+    if isinstance(wait, bool) or not isinstance(wait, (int, float)) or not math.isfinite(wait) or wait <= 0:
+        raise ValueError("action_wait_s must be finite and positive")
+    if config.get("pidnet_device", "auto") not in ("auto", "cpu", "cuda"):
+        raise ValueError("pidnet_device must be auto, cpu or cuda")
+    for field in ("run_dir", "worker_python"):
+        if field in config and (not isinstance(config[field], str) or not config[field].strip()):
+            raise ValueError(field + " must be a nonempty path")
+    base = Path(base or os.environ.get("RBNX_INVOCATION_CWD", ".")).expanduser().resolve()
+    if not isinstance(config.get("params_file"), str):
+        raise ValueError("params_file must be a path string")
+    path = Path(config.get("params_file", "")).expanduser()
     if not config.get("params_file"):
         raise ValueError("params_file is required")
     path = path if path.is_absolute() else base / path
@@ -118,11 +166,31 @@ def validate(config, base=None):
         "heading_source"
     ] not in ("wit_imu", "configured"):
         raise ValueError("Unsupported feedback source")
+    if not (policy["lidar_enabled"] or policy["camera_enabled"]):
+        raise ValueError("Enable at least one obstacle sensor")
+    weights = config.get("pidnet_weights", os.environ.get("PIDNET_WEIGHTS", ""))
+    if not isinstance(weights, str):
+        raise ValueError("pidnet_weights must be a path")
+    if weights:
+        weights = str((base / weights).resolve())
+    if policy["camera_enabled"] and policy["pidnet_enabled"] and not Path(weights).is_file():
+        raise ValueError("Camera PIDNet requires pidnet_weights or PIDNET_WEIGHTS")
+    if not (-.6 <= policy["camera_expected_ground_z_m"] <= -.05
+            and .005 <= policy["camera_ground_tolerance_m"] <= .1
+            and policy["camera_ground_z_min_m"] < policy["camera_ground_z_max_m"]):
+        raise ValueError("Invalid original camera ground calibration")
+    if (type(policy["camera_static_min_hits"]) is not int or policy["camera_static_min_hits"] < 2
+        or min(policy[k] for k in ("camera_static_dwell_s", "camera_static_gap_s", "camera_static_cell_m", "camera_static_drift_m")) <= 0):
+        raise ValueError("Invalid camera stability policy")
     bindings = {**TOPICS, **config.get("topic_remap", {})}
     if set(bindings) - TOPICS.keys():
         raise ValueError("Unknown topic role")
     for value in bindings.values():
         topic(value)
+    if bindings["camera_obstacles"] != "/outdoor/direct_nav/visual_obstacles":
+        raise ValueError("Original depth node requires its guarded outdoor observation endpoint")
+    if len({bindings[k] for k in ("cloud", "scan", "camera_scan", "camera_costmap", "camera_obstacles", "camera_ground", "camera_status")}) != 7:
+        raise ValueError("Lidar and camera scan topics must be distinct")
     if bindings["odom"] == "/ODOM":
         raise ValueError("Unreliable manufacturer /ODOM is not a supported input")
     output = topic(
@@ -140,36 +208,10 @@ def validate(config, base=None):
     gait_output = topic(config.get("gait_output_topic", "/robonix/nomotion/outdoor_gait"))
     if gait_output in (*bindings.values(), output, "/GAIT"):
         raise ValueError("Gait requests need a separate guarded UInt32 output topic")
-    grid = config.get(
-        "global_grid",
-        {
-            "origin": [-100.0, -100.0],
-            "width": 200.0,
-            "height": 200.0,
-            "resolution": 0.1,
-        },
-    )
-    if (
-        not isinstance(grid, dict)
-        or set(grid) - {"origin", "width", "height", "resolution", "rolling"}
-        or not {"origin", "width", "height", "resolution"} <= set(grid)
-        or type(grid.get("rolling", False)) is not bool
-        or not isinstance(grid["origin"], list)
-        or len(grid["origin"]) != 2
-    ):
-        raise ValueError("Invalid global_grid")
-    for value in [*grid["origin"], grid["width"], grid["height"], grid["resolution"]]:
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(value)
-        ):
-            raise ValueError("Invalid grid value")
-    if (
-        min(grid["width"], grid["height"], grid["resolution"]) <= 0
-        or grid["width"] * grid["height"] / grid["resolution"] ** 2 > 16000000
-    ):
-        raise ValueError("Invalid grid dimensions")
+    normalized = {**config, "params_file": str(path.resolve())}
+    nav2, derived, grid = prepare(normalized, bindings, policy)
+    projection = projection_config(config, policy)
+    policy.update(derived)
     return {
         **config,
         "params_file": str(path.resolve()),
@@ -178,7 +220,11 @@ def validate(config, base=None):
         "velocity_output_topic": output,
         "gait_switching_enabled": gait_enabled,
         "gait_output_topic": gait_output,
-        "global_grid": grid,
+        "global_grid": grid,  # Compatibility view derived from the deployment YAML.
+        "nav2_params": nav2,
+        "scan_projection": projection,
+        "pidnet_weights": weights,
+        **({"run_dir": str((base / Path(config["run_dir"]).expanduser()).resolve())} if "run_dir" in config else {}),
     }
 
 
