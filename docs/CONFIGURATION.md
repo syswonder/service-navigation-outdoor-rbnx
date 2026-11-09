@@ -12,7 +12,7 @@
 | 部署 manifest 的 `provider_ids` / `topic_remap` | Atlas 实例选择、显式 ROS 话题绑定、TF 话题 |
 | 部署 manifest 的 `scan_projection` | 雷达点云转扫描的高度、距离和 TF 容差 |
 | 部署 manifest 的 `policy` | 传感器开关、原相机地面标定、稳定性过滤、观测超时、参考路线验收及运动确认项 |
-| 部署 manifest 的 `pidnet_weights` / `pidnet_device` | 原 PIDNet-M 权重与推理设备 |
+| 部署 manifest 的 `semantic_segmentation` | 可选语义开关、适配器、必需权重、设备及模型选项 |
 | 服务 `config.spec` | 可接受字段、单位、默认值、分组和迁移说明；与运行时校验对应 |
 
 服务示例 YAML 是可复制的完整结构；机器人实际调参应在部署副本中完成。

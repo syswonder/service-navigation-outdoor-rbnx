@@ -32,6 +32,7 @@ def xyz(msg):
 class VisionFilter(Node):
     def __init__(self, runtime):
         super().__init__("outdoor_visual_post_filter")
+        self.segmentation_enabled = runtime["semantic_segmentation"]["enabled"]
         self.p, self.topics = runtime["policy"], runtime["topic_remap"]
         self.filter = StaticObstacles(*(self.p[k] for k in ("camera_static_cell_m", "camera_static_min_hits", "camera_static_dwell_s", "camera_static_gap_s", "camera_static_drift_m")))
         self.frames = {}
@@ -98,7 +99,7 @@ class VisionFilter(Node):
             center = np.array([pose.x, pose.y])
             region = observed_ground_region(ground[:,:2], center)
             semantic_road, nonroad = Polygon(), Polygon()
-            if self.p["pidnet_enabled"] and self.semantics is not None:
+            if self.segmentation_enabled and self.semantics is not None:
                 sem = self.semantics
                 sem_stamp = sem.header.stamp.sec+sem.header.stamp.nanosec/1e9
                 if sem.header.frame_id == "odom" and 0 <= now-sem_stamp < self.p["sensor_timeout_s"]:

@@ -89,15 +89,18 @@ properties:
       range_min_m: {type: number, default: 0.5, minimum: 0}
       range_max_m: {type: number, default: 8.0, exclusiveMinimum: 0}
       transform_tolerance_s: {type: number, default: 0.2, minimum: 0}
-  pidnet_weights:
-    type: string
+  semantic_segmentation:
+    type: object
     x-group: Vision
-    description: Original PIDNet-M checkpoint. Config takes priority over PIDNET_WEIGHTS. Relative paths resolve from the deploy manifest directory. Required only with camera_enabled and pidnet_enabled.
-  pidnet_device:
-    type: string
-    x-group: Vision
-    enum: [auto, cpu, cuda]
-    default: auto
+    additionalProperties: false
+    description: Optional model-neutral road segmentation. Enabled backends require an existing weights file; see README download links and plugin contract.
+    properties:
+      enabled: {type: boolean, default: false}
+      backend: {type: string, description: "pidnet or importable module:factory"}
+      weights: {type: string, description: "Required when enabled; downloaded weights file, relative to deploy manifest directory."}
+      device: {type: string, default: auto}
+      confidence_threshold: {type: number, default: 0.7, minimum: 0, maximum: 1}
+      options: {type: object, additionalProperties: true}
   policy:
     type: object
     x-group: Execution and observation
@@ -116,10 +119,6 @@ properties:
         type: boolean
         default: false
         description: "Measured depth registration and camera extrinsics confirmation; false does not manufacture free space."
-      pidnet_enabled:
-        type: boolean
-        default: true
-        description: "Enable the original auxiliary PIDNet road/sidewalk semantics when the camera is enabled."
       camera_expected_ground_z_m:
         type: number
         default: -0.18

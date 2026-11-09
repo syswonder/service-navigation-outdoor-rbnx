@@ -24,38 +24,43 @@ PIDNet-M -> road/sidewalk 掩码（置信度 0.7）-> 原语义投影，作为�
 地面覆盖继续使用原 observed_ground_region，四个角都需接近实际地面点；
 不以激光式射线或未知深度制造地面自由空间。
 
-PIDNet 仍只在几何已知自由区域叠加非道路软代价 40，不覆盖物理障碍或未知。
+语义分割仍只在几何已知自由区域叠加非道路软代价 40，不覆盖物理障碍或未知。
 相机本层使用原 build_costmap，再由随包编译的 CameraLayer 与雷达独立层取最大值合并；
 未知相机单元不修改雷达，旧相机标记在本帧/超时后退休。最后由 Nav2 统一执行规划控制。
 
-policy.lidar_enabled / camera_enabled 分别选择仅雷达、仅相机或两者。
-相机打开时默认 pidnet_enabled=true，需配置 pidnet_weights（原 PIDNet-M checkpoint）
-或 PIDNET_WEIGHTS。可显式关闭语义推理，原 RTAB-Map 几何仍运行。
-PIDNet/语义投影运行时失败按原链路降级为几何；深度/RTAB-Map/过滤失效则阻断相机就绪。
-权重不复制到仓库；包内驱动和模型源码独立于旧工作空间。
+`policy.lidar_enabled` / `camera_enabled` 选择雷达、相机或两者。相机几何检测与可选语义分割独立，默认 `semantic_segmentation.enabled: false`，无需语义模型权重或 PyTorch。
+启用语义分割必须先下载对应模型权重，再设置 `semantic_segmentation.weights`；仓库不附带权重，不自动下载。缺失权重在初始化时报错并提示本文。相对路径以部署 manifest 所在目录为基准。
 
 ```yaml
-pidnet_weights: assets/PIDNet_M_Cityscapes_test.pt
 policy:
   lidar_enabled: true
   camera_enabled: true
   camera_frame_confirmed: false # 必须实测确认配准和外参
-  pidnet_enabled: true
-  camera_expected_ground_z_m: -0.18
-  camera_ground_tolerance_m: 0.05
-  camera_static_min_hits: 4
-  camera_static_dwell_s: 0.6
-  camera_static_gap_s: 0.35
-  camera_static_cell_m: 0.15
-  camera_static_drift_m: 0.12
-topic_remap:
-  camera_rgb: /camera_gemini330/color/image_raw
-  camera_depth: /camera_gemini330/depth/image_raw
-  camera_depth_info: /camera_gemini330/depth/camera_info
-  camera_color_info: /camera_gemini330/color/camera_info
+semantic_segmentation:
+  enabled: true
+  backend: pidnet # 内置示例，也可替换为 your_package.road:create_backend
+  weights: assets/PIDNet_M_Cityscapes_test.pt # 必须先下载
+  device: auto
+  confidence_threshold: 0.7
+  options:
+    architecture: pidnet-m
 ```
 
-需安装原链路依赖 RTAB-Map、SciPy、Shapely 2、OpenCV、message_filters 和兼容 PyTorch。
+### 权重下载与可替换模型接口
+
+PIDNet 官方已公告旧单文件链接失效，请使用 [作者更新的权重下载目录](https://drive.google.com/drive/folders/0BySIOtxxULinfjlGdGFiT3NQVUdLVDBxWnhhTjB4VXNBRkFOa281WHlkektYY2VBcWVZb1k?resourcekey=0-w0JIXUekD-FCW-Rm1Z-HfQ&usp=sharing)，选择 Cityscapes 的 `PIDNet_M_Cityscapes_test.pt`，匹配 `architecture: pidnet-m`。[官方说明](https://github.com/XuJiacong/PIDNet)。链接来自官方，下载权限由提供方管理。
+
+通用接口位于 `outdoor_nav/segmentation.py`。其他模型设置 `backend: your_package.road:create_backend`，模块需安装到服务使用的 Python 环境。工厂签名为 `create_backend(*, weights, device, options)`，返回具有 `predict(rgb)` 方法的对象。
+
+- 输入：原尺寸 `H×W×3`、`uint8`、RGB 图像。
+- 返回 `(mask, confidence)`，均为原尺寸 `H×W`，必须恢复缩放或裁剪后的像素对应关系。
+- `mask` 为 `uint8`：`1` 道路（可按模型适配加入人行道）、`0` 非道路、`255` 未知。原模型类别编号仅在适配器内转换。
+- `confidence` 为 `[0,1]` 有限概率；服务将低置信度像素置为未知，拒绝不合法输出。
+- ROS 输出 `/outdoor/vision/road_mask`（`sensor_msgs/Image`、`mono8`）保留输入时间戳/坐标系；状态为 `/semantic/segmentation_status`。后续投影与融合不识别具体模型名称。
+
+语义只提供已知地面的软代价。推理故障、过期结果退回几何链路；关闭时不启动推理或语义投影。旧 `pidnet_weights`、`pidnet_device`、`policy.pidnet_enabled` 已移除，改用通用配置。PIDNet 模型代码仅作为可选适配器保留。
+
+需安装原链路依赖 RTAB-Map、SciPy、Shapely 2、OpenCV、message_filters 。只有选择 PIDNet 适配器时需要兼容 PyTorch。
 build.sh 会编译相机适配插件，start.sh 会加载包内 overlay。
 相机原检测输出固定使用原 live-domain guard 所要求的 outdoor observation 端点。
 关闭的传感器不参与依赖发现和健康门控；定位包不增加视觉里程计。

@@ -36,23 +36,21 @@ def vision_nodes(runtime, python, rosargs):
                       origin_x=-6., origin_y=-6., width=240, height=240, resolution=.05,
                       pixel_stride=2, temporal_frames=1, opening=False, closing=False,
                       max_data_age=p["sensor_timeout_s"])
-    pidnet = dict(pidnet_weights=runtime.get("pidnet_weights", ""), mode="pidnet", test_mode=False,
-                  device=runtime.get("pidnet_device", "auto"),
-                  traversable_train_ids=[0, 1], confidence_threshold=.7, max_image_age=p["sensor_timeout_s"])
-    if p["pidnet_enabled"] and not Path(pidnet["pidnet_weights"]).is_file():
-        raise ValueError("pidnet_weights must reference the original PIDNet-M checkpoint")
+    import json
+    segmentation = dict(config_json=json.dumps(runtime["semantic_segmentation"]),
+                        max_image_age=p["sensor_timeout_s"])
     children = []
     optional = []
     node_parameters = [("depth", depth)]
-    if p["pidnet_enabled"]:
-        node_parameters += [("pidnet", pidnet), ("projection", projection)]
+    if runtime["semantic_segmentation"]["enabled"]:
+        node_parameters += [("segmentation", segmentation), ("projection", projection)]
     for kind, parameters in node_parameters:
         path = Path(runtime["run_dir"]) / (kind+"_original.yaml")
         path.write_text(yaml.safe_dump({"/**": {"ros__parameters": parameters}}))
         action = ExecuteProcess(cmd=[python, "-m", "outdoor_nav.vision_nodes", kind,
             *rosargs, *args, "--params-file", str(path)], additional_env=env, output="screen")
         children.append(action)
-        if kind in ("pidnet", "projection"):
+        if kind in ("segmentation", "projection"):
             optional.append(action)
     children.append(Node(package="rtabmap_util", executable="obstacles_detection", name="outdoor_rtabmap_obstacles",
         remappings=[("cloud", "/outdoor/vision/rtabmap/input"), ("ground", "/outdoor/vision/rtabmap/ground"),

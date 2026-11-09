@@ -10,9 +10,9 @@ def main():
     if kind == "depth":
         from semantic_direct_navigation.depth_node import DepthObstacles
         node = DepthObstacles()
-    elif kind == "pidnet":
-        from semantic_local_grid.pidnet_node import PIDNetNode
-        node = PIDNetNode()
+    elif kind == "segmentation":
+        from outdoor_nav.segmentation_node import SegmentationNode
+        node = SegmentationNode()
     elif kind == "projection":
         from semantic_local_grid.projection_node import Projection
         node = Projection()

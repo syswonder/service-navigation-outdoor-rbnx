@@ -26,11 +26,12 @@ service:
         range_min_m: 0.5
         range_max_m: 8.0
         transform_tolerance_s: 0.2
+      semantic_segmentation:
+        enabled: false
       policy:
         lidar_enabled: true
         camera_enabled: false
         camera_frame_confirmed: false
-        pidnet_enabled: true
         camera_expected_ground_z_m: -0.18
         motion_enabled: false
         # Set calibration/feedback confirmations only after measuring them.

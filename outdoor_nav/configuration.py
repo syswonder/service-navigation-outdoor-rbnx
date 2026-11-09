@@ -12,7 +12,6 @@ DEFAULTS = {
     "lidar_enabled": True,
     "camera_enabled": False,
     "camera_frame_confirmed": False,
-    "pidnet_enabled": True,
     "camera_expected_ground_z_m": -0.18,
     "camera_ground_tolerance_m": 0.05,
     "camera_ground_z_min_m": -0.45,
@@ -89,7 +88,7 @@ def topic(value):
 def validate(config, base=None):
     if not isinstance(config, dict):
         raise ValueError("Service config must be an object")
-    allowed = {"params_file", "provider_ids", "topic_remap", "pidnet_weights", "pidnet_device",
+    allowed = {"params_file", "provider_ids", "topic_remap", "semantic_segmentation",
                "policy", "scan_projection", "velocity_output_topic", "gait_switching_enabled",
                "gait_output_topic", "global_grid", "run_dir", "http_port", "action_wait_s", "worker_python"}
     if set(config) - allowed:
@@ -105,8 +104,6 @@ def validate(config, base=None):
     wait = config.get("action_wait_s", 45.)
     if isinstance(wait, bool) or not isinstance(wait, (int, float)) or not math.isfinite(wait) or wait <= 0:
         raise ValueError("action_wait_s must be finite and positive")
-    if config.get("pidnet_device", "auto") not in ("auto", "cpu", "cuda"):
-        raise ValueError("pidnet_device must be auto, cpu or cuda")
     for field in ("run_dir", "worker_python"):
         if field in config and (not isinstance(config[field], str) or not config[field].strip()):
             raise ValueError(field + " must be a nonempty path")
@@ -168,13 +165,8 @@ def validate(config, base=None):
         raise ValueError("Unsupported feedback source")
     if not (policy["lidar_enabled"] or policy["camera_enabled"]):
         raise ValueError("Enable at least one obstacle sensor")
-    weights = config.get("pidnet_weights", os.environ.get("PIDNET_WEIGHTS", ""))
-    if not isinstance(weights, str):
-        raise ValueError("pidnet_weights must be a path")
-    if weights:
-        weights = str((base / weights).resolve())
-    if policy["camera_enabled"] and policy["pidnet_enabled"] and not Path(weights).is_file():
-        raise ValueError("Camera PIDNet requires pidnet_weights or PIDNET_WEIGHTS")
+    from .segmentation import validate_segmentation
+    segmentation = validate_segmentation(config.get("semantic_segmentation", {}), base, policy["camera_enabled"])
     if not (-.6 <= policy["camera_expected_ground_z_m"] <= -.05
             and .005 <= policy["camera_ground_tolerance_m"] <= .1
             and policy["camera_ground_z_min_m"] < policy["camera_ground_z_max_m"]):
@@ -223,7 +215,7 @@ def validate(config, base=None):
         "global_grid": grid,  # Compatibility view derived from the deployment YAML.
         "nav2_params": nav2,
         "scan_projection": projection,
-        "pidnet_weights": weights,
+        "semantic_segmentation": segmentation,
         **({"run_dir": str((base / Path(config["run_dir"]).expanduser()).resolve())} if "run_dir" in config else {}),
     }
 

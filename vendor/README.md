@@ -19,5 +19,5 @@ The service adapters only provide parameters/remaps and insert vision_filter
 after the original detector. They do not modify any vendored detection algorithm.
 No checkpoint weights, original device configuration or runtime data are bundled.
 The original semantic_direct_navigation, semantic_local_grid and sensor_sanity_checker
-package manifests declare Apache-2.0; see LICENSE.apache-2.0. Original source contents
+package manifests declare Apache-2.0; see LICENSE.apache-2.0. Exception: PIDNet model files in semantic_local_grid/pidnet_vendor/ are MIT, copyright 2022 Jiacong Xu; see its LICENSE and https://github.com/XuJiacong/PIDNet. Original source contents
 and notices are retained. The service wrapper keeps its own top-level license.
