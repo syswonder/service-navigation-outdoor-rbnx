@@ -9,3 +9,6 @@ __pycache__/
 /logs/
 
 /core.*
+
+# Local tests, reports, backups and machine-specific configuration
+/local_only/
