@@ -21,6 +21,31 @@ def test_ordered_u_route_and_bounded_horizon():
     assert math.dist(tuple(a.values()), tuple(g.points[window[-1]].values())) <= 6.0
 
 
+def test_long_approach_keeps_short_horizon_and_entry_turn_without_expanding_route():
+    import tracemalloc
+
+    start, entry, goal = {"x": -10000000.0, "y": 0.0}, {"x": 0.0, "y": 0.0}, {"x": 0.0, "y": 20.0}
+    tracemalloc.start()
+    try:
+        guidance = RouteGuidance([start, entry, goal], start, goal)
+        assert guidance.remaining_length(start) == 10000020.0
+        window = guidance.window(start)
+        assert all(distance_from_start <= 6.0 for distance_from_start in (
+            math.dist(tuple(start.values()), tuple(guidance.points[i].values())) for i in window))
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < 1024 * 1024
+    guidance.index = 4999999
+    position = {"x": -2.0, "y": 0.0}
+    assert guidance.remaining_length(position) == 22.0
+    assert guidance.window(position)[0] == 5000000
+    assert guidance.points[5000000] == entry
+    assert 5000000 in guidance.bends
+    guidance.index = len(guidance.points) - 1
+    assert guidance.final_leg and guidance.remaining_length(goal) == 0.0
+
+
 def test_scan_inf_semantics_and_staleness():
     s = S(
         header=S(stamp=S(sec=1, nanosec=0), frame_id="base_link"),

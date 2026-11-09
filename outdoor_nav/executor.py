@@ -645,7 +645,7 @@ class Executor(Node):
                 remaining = math.dist(
                     (position["x"], position["y"]), (goal_point["x"], goal_point["y"])
                 )
-                route_remaining = length([position, *guidance.points[guidance.index :]])
+                route_remaining = guidance.remaining_length(position)
                 self.tasks.update(task_id, distance_remaining_m=route_remaining)
                 feedback = NavigateToPose.Feedback()
                 feedback.current_pose.header.frame_id = "map"

@@ -1,4 +1,6 @@
 import math
+from bisect import bisect_left
+from collections.abc import Sequence
 
 
 def distance(a, b):
@@ -47,6 +49,40 @@ def validate_point(value):
     return {k: float(value[k]) for k in ("x", "y")}
 
 
+class SampledPolyline(Sequence):
+    """Two-metre route stations computed on demand from the retained corners."""
+
+    def __init__(self, corners):
+        self.corners = corners
+        self.indices = [0]
+        for a, b in zip(corners, corners[1:]):
+            self.indices.append(self.indices[-1] + max(1, math.ceil(distance(a, b) / 2.0)))
+        self.remaining = [0.0] * len(corners)
+        for i in range(len(corners) - 2, -1, -1):
+            self.remaining[i] = distance(corners[i], corners[i + 1]) + self.remaining[i + 1]
+
+    def __len__(self):
+        return self.indices[-1] + 1
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self[i] for i in range(*index.indices(len(self)))]
+        if index < 0:
+            index += len(self)
+        if not 0 <= index < len(self):
+            raise IndexError(index)
+        end = bisect_left(self.indices, index)
+        if self.indices[end] == index:
+            return dict(self.corners[end])
+        a, b = self.corners[end - 1:end + 1]
+        ratio = (index - self.indices[end - 1]) / (self.indices[end] - self.indices[end - 1])
+        return {key: a[key] + (b[key] - a[key]) * ratio for key in ("x", "y")}
+
+    def remaining_length(self, index):
+        end = bisect_left(self.indices, index)
+        return distance(self[index], self.corners[end]) + self.remaining[end]
+
+
 class RouteGuidance:
     """Ordered, short planning legs; road geometry is guidance, never map data.
 
@@ -79,20 +115,16 @@ class RouteGuidance:
                 keep.add(middle)
                 pending.extend(((a, middle), (middle, b)))
         corners = [points[i] for i in sorted(keep)]
-        self.points, self.bends = [corners[0]], set()
-        for a, b in zip(corners, corners[1:]):
-            steps = max(1, math.ceil(distance(a, b) / 2.0))
-            self.points.extend(
-                {key: a[key] + (b[key] - a[key]) * i / steps for key in ("x", "y")}
-                for i in range(1, steps + 1)
-            )
-            self.points[-1] = dict(b)
-            self.bends.add(len(self.points) - 1)
+        self.points = SampledPolyline(corners)
+        self.bends = set(self.points.indices[1:])
         self.index = min(1, len(self.points) - 1)
 
     @property
     def final_leg(self):
         return self.index == len(self.points) - 1
+
+    def remaining_length(self, position):
+        return distance(position, self.points[self.index]) + self.points.remaining_length(self.index)
 
     def window(self, position):
         """Return an ordered ~6 m horizon and its identity for preemption.
