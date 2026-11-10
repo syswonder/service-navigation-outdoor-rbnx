@@ -16,7 +16,7 @@ DEFAULTS = {
     "max_angular_speed_rps": 0.4,
     "footprint_radius_m": 0.6,
     "cloud_min_height_m": -0.3,
-    "cloud_max_height_m": 1.5,
+    "cloud_max_height_m": 0.7,
     "cloud_min_height_near_m": 0.2,
     "cloud_min_height_far_m": 0.5,
     "cloud_height_ramp_m": 8.0,
