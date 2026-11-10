@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 
 from outdoor_nav.core.height_filter import body_band, filter_xyz, graded_minimum
-from outdoor_nav.core.scan_gate import gated_ranges, stairs_obstacle_off
+from outdoor_nav.core.scan_gate import stairs_obstacle_off
 
 
 def test_ground_relative_band_is_offset_by_measured_lidar_height():
@@ -38,8 +38,3 @@ def test_stairs_only_suppress_after_a_request():
     assert stairs_obstacle_off({"target_code": 0x3003, "attempts": 1})
     assert stairs_obstacle_off({"target_code": 0x3003, "confirmed": True})
     assert not stairs_obstacle_off({"target_code": 0x3003, "attempts": 1}, enabled=False)
-
-
-def test_suppressed_scan_is_infinite_and_clears():
-    assert gated_ranges([1., 2.], True) == [math.inf, math.inf]
-    assert gated_ranges([1., 2.], False) == [1., 2.]

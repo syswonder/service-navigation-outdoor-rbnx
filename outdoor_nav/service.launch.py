@@ -84,7 +84,7 @@ def nodes(context):
                 if robot["obstacle_layer_enabled"]
                 else "",
                 "scan": {
-                    "topic": "/outdoor/scan",
+                    "topic": "/outdoor/obstacle_scan",
                     "data_type": "LaserScan",
                     "marking": True,
                     "clearing": True,
@@ -156,8 +156,6 @@ def nodes(context):
                 "-m",
                 "outdoor_nav.guard",
                 *rosargs,
-                "-r",
-                "/outdoor/scan:=/outdoor/raw_scan",
                 "-p",
                 "robot_config:=" + runtime_file,
             ],
@@ -188,7 +186,7 @@ def nodes(context):
             package="pointcloud_to_laserscan",
             executable="pointcloud_to_laserscan_node",
             remappings=[("cloud_in", "/outdoor/cloud_for_scan"),
-                         ("scan", "/outdoor/raw_scan")],
+                         ("scan", policy["scan"])],
             parameters=[
                 {
                     "target_frame": "base_link",

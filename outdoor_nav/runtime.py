@@ -29,7 +29,8 @@ from tf2_ros import Buffer, TransformListener
 from .configuration import load_runtime
 from .core.scan_health import healthy_scan
 from .core.gait import GaitSchedule, STAIRS
-from .core.scan_gate import gated_ranges, stairs_obstacle_off
+from .core.scan_gate import stairs_obstacle_off
+from std_srvs.srv import Empty
 from .core.tasks import TaskStore, TERMINAL
 from .executor import Executor, LATCHED
 from .http import serve, ApiError
@@ -91,10 +92,18 @@ class OutdoorExecutor(Executor):
             for n in ("planner_server", "controller_server")
         }
         self.command_pub = self.create_publisher(Twist, "/outdoor/safe_command", 10)
-        self.raw_scan, self.raw_scan_at = None, -math.inf
-        self.scan_pub = self.create_publisher(
-            LaserScan, "/outdoor/scan", qos_profile_sensor_data
+        self.scan, self.scan_at = None, -math.inf
+        self.obstacles_off = False
+        self.obstacle_scan_pub = self.create_publisher(
+            LaserScan, "/outdoor/obstacle_scan", qos_profile_sensor_data
         )
+        self.clear_costmaps = [
+            self.create_client(Empty, name)
+            for name in (
+                "/global_costmap/clear_entirely_global_costmap",
+                "/local_costmap/clear_entirely_local_costmap",
+            )
+        ]
         self.gait_schedule = self.gait_task = None
         self.gait_pub = (self.create_publisher(UInt32, self.runtime["gait_output_topic"], 10)
                          if self.runtime.get("gait_switching_enabled", False) else None)
@@ -109,7 +118,7 @@ class OutdoorExecutor(Executor):
             (String, "/outdoor/localization", self.on_geo, 10),
             (String, "/outdoor/command_status", self.on_guard, 10),
             (String, "/outdoor/chassis_status", self.on_chassis, 10),
-            (LaserScan, "/outdoor/raw_scan", self.on_scan, qos_profile_sensor_data),
+            (LaserScan, "/outdoor/scan", self.on_scan, qos_profile_sensor_data),
         ):
             self.create_subscription(kind, name, callback, qos)
         self.server = ActionServer(
@@ -267,7 +276,7 @@ class OutdoorExecutor(Executor):
             setattr(self, name, {})
 
     def on_scan(self, msg):
-        self.raw_scan, self.raw_scan_at = msg, time.monotonic()
+        self.scan, self.scan_at = msg, time.monotonic()
         if healthy_scan(
             msg,
             self.get_clock().now().nanoseconds / 1e9,
@@ -283,29 +292,27 @@ class OutdoorExecutor(Executor):
         )
 
     def scan_gate_tick(self):
-        """Stair treads look like obstacles; stop feeding them to the costmap.
+        """Stop marking lidar returns as obstacles while the stair gait runs.
 
-        The guard still reads the raw scan, so losing the lidar keeps its
-        existing readiness failure. An infinite scan clears earlier marks on
-        entry rather than freezing the last stair edge in the costmap.
+        The sensor topic stays the real scan for the guard and any observer;
+        only the obstacle layer's copy is withheld. Existing marks are cleared
+        through Nav2's own service instead of publishing a fabricated scan.
         """
-        raw = self.raw_scan
-        if raw is None:
+        scan = self.scan
+        if scan is None:
             return
         stairs = self.stairs_active()
-        fresh = time.monotonic() - self.raw_scan_at < self.config["sensor_timeout_s"]
-        message = LaserScan()
-        message.header = raw.header
-        message.angle_min, message.angle_max = raw.angle_min, raw.angle_max
-        message.angle_increment = raw.angle_increment
-        message.time_increment = raw.time_increment
-        message.scan_time = raw.scan_time
-        message.range_min, message.range_max = raw.range_min, raw.range_max
-        suppress = stairs or not fresh
-        message.ranges = gated_ranges(raw.ranges, suppress)
-        if not suppress:
-            message.intensities = raw.intensities
-        self.scan_pub.publish(message)
+        if stairs != self.obstacles_off:
+            self.obstacles_off = stairs
+            if stairs:
+                for client in self.clear_costmaps:
+                    if client.service_is_ready():
+                        client.call_async(Empty.Request())
+        if stairs:
+            return
+        if time.monotonic() - self.scan_at >= self.config["sensor_timeout_s"]:
+            return
+        self.obstacle_scan_pub.publish(scan)
 
     def status(self, include_task=True):
         now = time.monotonic()
