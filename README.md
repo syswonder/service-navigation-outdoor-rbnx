@@ -90,7 +90,9 @@ bash scripts/build.sh
 
 ### 斜坡高度门限与楼梯避障
 
-雷达点的高度门限不再是一个固定下限。`cloud_min_height_near_m`（默认 0.2 米）按水平距离线性增加，到 `cloud_height_ramp_m`（默认 8 米）达到 `cloud_min_height_far_m`（默认 0.5 米）。这样近处仍能发现低障碍，远处上坡的路面不会因为抬高而被当成障碍。原来的 `cloud_min_height_m` 只为兼容旧配置保留，已不参与投影。
+雷达点的高度门限按离地高度计算。2026-10-30 室外实测（站立、三帧）地面在 `base_link` 下 z≈−0.42 米，即雷达离地约 0.42 米；`lidar_height_m`（默认 0.42）就是这个测值。配置的 `cloud_min_height_near_m`（默认 0.2 米）、`cloud_min_height_far_m`（默认 0.5 米）、`cloud_max_height_m`（默认 0.7 米）都是“离地高度”，过滤节点先按 TF 把点变换到 `base_link`，再减去雷达高度换算成 z 门限（例如离地 0.2 米＝`base_link` 的 −0.22 米）。
+
+近端 0.2 米按水平距离线性增加，到 `cloud_height_ramp_m`（默认 8 米）达到 0.5 米。这样近处仍能发现低障碍，远处上坡的路面不会因为抬高而被当成障碍。原来的 `cloud_min_height_m` 只为兼容旧配置保留，已不参与投影；它当年的 −0.3～0.3 正对应离地约 0.12～0.72 米。
 
 过滤在投影成 LaserScan 之前完成，`cloud_height_filter` 只保留高于当前距离门限、且不超过 `cloud_max_height_m` 的点。上限默认保持现场用的 0.7 米；若配置的上限低于“远端门限＋0.2 米”，过滤节点会把远端有效上限抬到该值并打印警告，避免远处真实障碍被整体删掉。
 

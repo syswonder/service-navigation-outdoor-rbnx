@@ -20,6 +20,7 @@ DEFAULTS = {
     "cloud_min_height_near_m": 0.2,
     "cloud_min_height_far_m": 0.5,
     "cloud_height_ramp_m": 8.0,
+    "lidar_height_m": 0.42,
     "stairs_disable_obstacle_layer": True,
     "scan_range_min_m": 0.5,
     "planner_patience_s": 60.0,
@@ -114,6 +115,7 @@ def validate(config, base=None):
         and 0 <= policy["cloud_min_height_near_m"] <= policy["cloud_min_height_far_m"]
         and policy["cloud_height_ramp_m"] > 0
         and policy["cloud_max_height_m"] > policy["cloud_min_height_near_m"]
+        and 0 < policy["lidar_height_m"] <= 2
         and 0 <= policy["scan_range_min_m"] < 8
         and 0 <= policy["planner_patience_s"] <= 300
         and 0 < policy["controller_patience_s"] <= 300

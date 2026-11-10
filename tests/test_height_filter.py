@@ -2,8 +2,12 @@ import math
 import numpy as np
 import pytest
 
-from outdoor_nav.core.height_filter import filter_xyz, graded_minimum
+from outdoor_nav.core.height_filter import body_band, filter_xyz, graded_minimum
 from outdoor_nav.core.scan_gate import gated_ranges, stairs_obstacle_off
+
+
+def test_ground_relative_band_is_offset_by_measured_lidar_height():
+    assert body_band(.2, .5, .7, .42) == pytest.approx((-.22, .08, .28))
 
 
 def test_graded_minimum_ramps_from_near_to_far():

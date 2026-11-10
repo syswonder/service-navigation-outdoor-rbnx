@@ -179,6 +179,8 @@ def nodes(context):
                 "ramp_m:=" + repr(robot["cloud_height_ramp_m"]),
                 "-p",
                 "max_m:=" + repr(robot["cloud_max_height_m"]),
+                "-p",
+                "lidar_height_m:=" + repr(robot["lidar_height_m"]),
             ],
             output="screen",
         ),
