@@ -18,6 +18,15 @@ class CloudHeightFilter(Node):
         self.ceiling = float(self.declare_parameter("max_m", 1.5).value)
         if not (0 <= self.near <= self.far and self.ramp > 0 and self.ceiling > self.near):
             raise ValueError("Invalid graded height parameters")
+        # A ceiling below the far threshold would delete every far point,
+        # including real obstacles, so keep a thin band above either value.
+        requested = self.ceiling
+        self.ceiling = max(self.ceiling, self.far + 0.2)
+        if self.ceiling != requested:
+            self.get_logger().warn(
+                "cloud_max_height_m %.2f is below the far height threshold; "
+                "using %.2f for far points" % (requested, self.ceiling)
+            )
         self.publisher = self.create_publisher(PointCloud2, "/outdoor/cloud_for_scan", 10)
         self.create_subscription(PointCloud2, "cloud_in", self.receive, qos_profile_sensor_data)
 
