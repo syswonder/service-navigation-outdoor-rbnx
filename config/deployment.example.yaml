@@ -28,6 +28,10 @@ service:
         transform_tolerance_s: 0.2
       semantic_segmentation:
         enabled: false
+        # To enable (needs camera_enabled and a downloaded model dir, see README):
+        # backend: outdoor_nav.segformer_backend:create_backend
+        # weights: assets/segformer-b0-cityscapes
+        # options: {input_scale: 1.0, road_class_ids: [0, 1]}
       policy:
         lidar_enabled: true
         camera_enabled: false

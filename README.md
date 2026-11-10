@@ -38,13 +38,22 @@ policy:
   camera_frame_confirmed: false # 必须实测确认配准和外参
 semantic_segmentation:
   enabled: true
-  backend: pidnet # 内置示例，也可替换为 your_package.road:create_backend
-  weights: assets/PIDNet_M_Cityscapes_test.pt # 必须先下载
+  backend: outdoor_nav.segformer_backend:create_backend # 推荐；也可 pidnet
+  weights: assets/segformer-b0-cityscapes # 必须先下载的模型目录
   device: auto
   confidence_threshold: 0.7
   options:
-    architecture: pidnet-m
+    input_scale: 1.0 # 可设 0.5 加速
+    road_class_ids: [0, 1] # Cityscapes: 0 road, 1 sidewalk
 ```
+
+#### 推荐：SegFormer-B0 Cityscapes
+
+在 100 张山猫实拍图上，PIDNet-M 有 30 张前方路面漏认过半，SegFormer-B0 为 0 张（缩小到 0.5 倍仍为 0）。需要 `pip install torch transformers opencv-python`。
+下载 [nvidia/segformer-b0-finetuned-cityscapes-1024-1024](https://huggingface.co/nvidia/segformer-b0-finetuned-cityscapes-1024-1024) 到本地目录（如 `huggingface-cli download nvidia/segformer-b0-finetuned-cityscapes-1024-1024 --local-dir assets/segformer-b0-cityscapes`），`weights` 指向该目录。运行时只读本地文件，不联网。
+选项：`input_scale`（默认 1.0，推理前缩放，结果仍恢复原尺寸）、`road_class_ids`（默认 `[0, 1]`）。置信度为 softmax 最大概率，低于 `confidence_threshold` 的像素记为未知。
+
+PIDNet 示例：`backend: pidnet`、`weights: assets/PIDNet_M_Cityscapes_test.pt`、`options: {architecture: pidnet-m}`。
 
 ### 权重下载与可替换模型接口
 

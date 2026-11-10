@@ -25,18 +25,20 @@ def validate_segmentation(raw, base, camera_enabled):
             raise ValueError('semantic_segmentation.enabled requires policy.camera_enabled')
         if cfg['backend'] != 'pidnet' and not re.fullmatch(r'[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*:[A-Za-z_]\w*', cfg['backend']):
             raise ValueError('Choose semantic_segmentation.backend: pidnet or importable module:factory; see README')
-        if not cfg['weights'] or not Path(cfg['weights']).is_file():
-            raise ValueError('Semantic segmentation requires downloaded model weights: set semantic_segmentation.weights to an existing file. Weights are not bundled or downloaded automatically; see README download links.')
+        if not cfg['weights'] or not Path(cfg['weights']).exists():
+            raise ValueError('Semantic segmentation requires downloaded model weights: set semantic_segmentation.weights to an existing file or model directory. Weights are not bundled or downloaded automatically; see README download links.')
     return cfg
 
 
 def create_backend(cfg):
     if not cfg['enabled']:
         raise ValueError('Semantic segmentation is disabled')
-    if not Path(cfg['weights']).is_file():
+    if not Path(cfg['weights']).exists():
         raise ValueError('Missing semantic_segmentation.weights; download the model weights described in README')
     if cfg['backend'] == 'pidnet':
         # Only this optional adapter knows PIDNet / Cityscapes class IDs.
+        if not Path(cfg['weights']).is_file():
+            raise ValueError('PIDNet weights must be a .pt file')
         from semantic_local_grid.inference import Segmenter
         options = cfg['options']
         if set(options) - {'architecture', 'threads', 'traversable_train_ids'}:

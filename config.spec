@@ -93,14 +93,14 @@ properties:
     type: object
     x-group: Vision
     additionalProperties: false
-    description: Optional model-neutral road segmentation. Enabled backends require an existing weights file; see README download links and plugin contract.
+    description: Optional model-neutral road segmentation. Enabled backends require existing weights (file, or model directory for SegFormer); see README download links and plugin contract.
     properties:
       enabled: {type: boolean, default: false}
-      backend: {type: string, description: "pidnet or importable module:factory"}
-      weights: {type: string, description: "Required when enabled; downloaded weights file, relative to deploy manifest directory."}
+      backend: {type: string, description: "pidnet, outdoor_nav.segformer_backend:create_backend, or importable module:factory"}
+      weights: {type: string, description: "Required when enabled; downloaded weights file or model directory, relative to deploy manifest directory."}
       device: {type: string, default: auto}
       confidence_threshold: {type: number, default: 0.7, minimum: 0, maximum: 1}
-      options: {type: object, additionalProperties: true}
+      options: {type: object, additionalProperties: true, description: "Backend options. SegFormer: input_scale (default 1.0), road_class_ids (default [0, 1])."}
   policy:
     type: object
     x-group: Execution and observation
