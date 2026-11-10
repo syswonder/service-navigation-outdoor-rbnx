@@ -7,6 +7,9 @@ from pathlib import Path
 import re
 import tempfile
 import threading
+import time
+from logging.handlers import RotatingFileHandler
+import logging
 
 
 from .http import ApiError
@@ -88,6 +91,9 @@ class SceneNavigation:
     def __init__(self, run_dir="rbnx-build/scene_requests", execution=None, policy=None,
                  execution_enabled=False, localization_config_path=None):
         self.current_map = None
+        self.localization_log = None
+        self.localization_logged_at = -float("inf")
+        self.localization_logged_stage = None
         self.localization = AtlasLocalization(localization_config_path) if localization_config_path else None
         self.execution = execution or AtlasExecution()
         self.execution_enabled = execution_enabled
@@ -127,7 +133,28 @@ class SceneNavigation:
             value["ready"] = False
             value["not_ready_reasons"] = [*value.get("not_ready_reasons", []),
                                          "map_coordinate_reference_mismatch"]
+        fusion = value.get("fusion")
+        if isinstance(fusion, dict):
+            self.record_localization(value)
         return value
+
+    def record_localization(self, value):
+        fusion = value["fusion"]
+        stage = (value.get("localization_grade"), fusion.get("rtk_grade"), fusion.get("stage"), fusion.get("recovery_id"))
+        with self.lock:
+            now = time.monotonic()
+            if now-self.localization_logged_at < 1. and stage == self.localization_logged_stage:
+                return
+            if self.localization_log is None:
+                self.run_dir.mkdir(parents=True, exist_ok=True)
+                self.localization_log = RotatingFileHandler(self.run_dir/"localization.jsonl", maxBytes=2*1024*1024, backupCount=2, encoding="utf-8")
+            fields = ("stage", "rtk_grade", "estimate_valid", "navigation_ready", "inertial", "inertial_elapsed_s",
+                      "fusion_elapsed_s", "fusion_timer_reference", "outage_s", "recovery_id", "uncertainty")
+            record = {"recorded_at_unix_s": time.time(), "map_id": (value.get("coordinate_reference") or {}).get("map_id"),
+                      "grade": value.get("localization_grade"), **{k: fusion.get(k) for k in fields}}
+            self.localization_log.emit(logging.LogRecord("outdoor.localization", logging.INFO, "", 0,
+                                                        json.dumps(record, allow_nan=False), (), None))
+            self.localization_logged_at, self.localization_logged_stage = now, stage
 
     def _follow_recorded(self, request_id, source, build):
         if not self.execution_enabled:

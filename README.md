@@ -118,3 +118,11 @@ PYTHONPATH=. python3 -m pytest -q
 ```
 
 独立回归不需要原工程或校园资源。`tests/test_scene.py` 与 `test_scene_wire.py` 验证新地图身份、步态区段、幂等重试和真实 gRPC；`tests/stairs_smoke.py` 在隔离域 188 使用真实 Nav2 和虚拟传感器验证空地图启动、步态确认、楼梯避障暂停/恢复及超时停车。历史算法冻结快照仅用于回归来源对照，不在运行路径中。
+
+## 惯导连续定位
+
+定位状态 grade 支持 inertial：只允许已接收的任务在 ready=true 时继续，不允许新任务或
+通过请求中的 fixed 字段绕过检查；已有请求 ID 重试和取消保持可用。
+RTK 恢复的 recovery_id 变化触发停车、释放旧控制目标、重新规划；纯惯导到点停车等待
+RTK 确认，等待上限沿用 navigation_recovery_timeout_s。定位误差超限和传感器断流仍会停车。
+状态透传 fusion，并提供 new_task_ready；惯性速度为估计值，不是独立停车传感器。

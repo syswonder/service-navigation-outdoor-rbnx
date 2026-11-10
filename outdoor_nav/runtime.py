@@ -33,6 +33,7 @@ from .core.tasks import TaskStore, TERMINAL
 from .executor import Executor, LATCHED
 from .http import serve, ApiError
 from .requests import submit
+from .localization_policy import continuation_allowed, arrival_confirmed
 
 
 class OutdoorExecutor(Executor):
@@ -206,6 +207,16 @@ class OutdoorExecutor(Executor):
                 and getattr(self, "active_controller", None) == self.controller_id())
 
     async def wait_for_ready_pose(self, task_id):
+        recovery = (self.geo.get("fusion") or {}).get("recovery_id", 0)
+        if recovery != getattr(self, "handled_recovery", 0):
+            self.stopping = True
+            self.command_pub.publish(Twist())
+            requests = getattr(self, "active_follow_requests", [])
+            results = getattr(self, "active_follow_results", {})
+            if not await self.release_controller(requests, results) or not await self.confirm_stop():
+                raise RuntimeError("Cannot release controller after RTK position correction")
+            self.handled_recovery = recovery
+            self.tasks.update(task_id, state="replanning", reason="RTK restored; replanning after position correction")
         was_stopping = self.stopping
         while True:
             position = await super().wait_for_ready_pose(task_id)
@@ -228,6 +239,10 @@ class OutdoorExecutor(Executor):
 
     def on_geo(self, msg):
         self._state(msg, "geo")
+        recovery = (self.geo.get("fusion") or {}).get("recovery_id", 0)
+        if self.owner and recovery != getattr(self, "handled_recovery", 0):
+            self.stopping = True
+            self.command_pub.publish(Twist())
 
     def on_guard(self, msg):
         self._state(msg, "guard")
@@ -261,19 +276,13 @@ class OutdoorExecutor(Executor):
         owned = (
             self.tasks.snapshot(self.owner, include_paths=False) if self.owner else None
         )
-        required = owned.get("localization_grade") if owned else None
         health = {
             k: now - self.stats.get(k, -math.inf) < limit
             for k, limit in (("lidar", t), ("global_map", 3), ("local_map", t))
         }
         health.update(
-            localization=bool(g.get("ready"))
-            and now - self.geo_at < t
-            and (
-                required != "fixed"
-                or g.get("grade") == "fixed"
-                or (g.get("grade") == "float" and c["allow_float_during_fixed_task"])
-            ),
+            localization=continuation_allowed(g, owned, c["allow_float_during_fixed_task"])
+            and now-self.geo_at < t,
             heading=bool(g.get("heading", {}).get("ready"))
             if c["heading_source"] == "wit_imu"
             else True,
@@ -316,6 +325,8 @@ class OutdoorExecutor(Executor):
             "ready": all(health.values()),
             "health": health,
             "localization_grade": g.get("grade"),
+            "fusion": g.get("fusion"),
+            "new_task_ready": g.get("grade") in ("fixed", "float") and all(health.values()),
             "coordinate_reference": g.get("coordinate_reference"),
             "gait_status": owned.get("gait_status") if owned else None,
             "gait_switching_enabled": self.runtime.get("gait_switching_enabled", False),
@@ -355,6 +366,7 @@ class OutdoorExecutor(Executor):
             and s["goal"]["x"] == p.x
             and s["goal"]["y"] == p.y
             and self.status(False)["ready"]
+            and self.geo.get("grade") in ("fixed", "float")
             else GoalResponse.REJECT
         )
 
@@ -369,6 +381,18 @@ class OutdoorExecutor(Executor):
             handle.abort()
             return NavigateToPose.Result()
         return await super().execute(handle)
+
+    async def wait_for_arrival_confirmation(self, task_id):
+        deadline = time.monotonic()+self.config["navigation_recovery_timeout_s"]
+        while not arrival_confirmed(self.geo):
+            if self.interrupted(task_id):
+                raise InterruptedError("Canceled while waiting for RTK at destination")
+            self.stopping = True
+            self.command_pub.publish(Twist())
+            self.tasks.update(task_id, state="planning", reason="Waiting for RTK to confirm arrival")
+            if time.monotonic() >= deadline:
+                raise RuntimeError("RTK did not recover to confirm arrival; stopped")
+            await self.pause(.1)
 
     def arrival_heading_ok(self, position, goal):
         return (

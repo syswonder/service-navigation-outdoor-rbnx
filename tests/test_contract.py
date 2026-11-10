@@ -113,6 +113,12 @@ def test_extracted_motion_methods_match_frozen_upstream():
         if name in ("costmap_snapshot", "execute", "safety_tick", "controller_id", "motion_allowed"):
             continue  # Route input, confirmed gait gate and controller switching are intentional changes.
         a, b = old[name], new[name]
+        if name == "destroy_node":
+            # The independent service does not own the upstream obstacle process.
+            a.body = [statement for statement in a.body if not (
+                isinstance(statement, ast.If) and isinstance(statement.test, ast.Compare)
+                and isinstance(statement.test.left, ast.Attribute)
+                and statement.test.left.attr == "obstacles")]
         if name == "guided_path":
             a.body[0].value.value = a.body[0].value.value.replace(
                 "RPP path", "controller path"

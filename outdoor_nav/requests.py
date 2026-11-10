@@ -89,6 +89,8 @@ def submit(node, payload):
             ):
                 raise ApiError(409, "request_id was used for a different execution")
             return old
+        if status.get("localization_grade") not in ("fixed", "float"):
+            raise ApiError(503, "New tasks require current RTK fixed or float; inertial continuation only")
         if metadata["map_id"] is not None:
             ref = status.get("coordinate_reference") or {}
             if (ref.get("frame_id") != "map" or ref.get("axes") != "east_north"

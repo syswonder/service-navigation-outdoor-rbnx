@@ -607,6 +607,7 @@ class Executor(Node):
             state = self.tasks.snapshot(task_id, include_paths=True)
             if self.interrupted(task_id):
                 raise InterruptedError("Task canceled before planning")
+            self.active_follow_requests, self.active_follow_results = follow_requests, follow_results
             self.tasks.update(task_id, state="planning")
             position = await self.wait_for_ready_pose(task_id)
             # Preview and execution use exactly the same road-preference policy.
@@ -627,10 +628,18 @@ class Executor(Node):
             )
             started_sim = self.get_clock().now().nanoseconds / 1e9
             controller_used = None
+            recovery_used = getattr(self, "handled_recovery", 0)
             while True:
                 if self.interrupted(task_id):
                     raise InterruptedError("Task canceled or superseded")
                 position = await self.wait_for_ready_pose(task_id)
+                recovery = getattr(self, "handled_recovery", 0)
+                if recovery != recovery_used:
+                    current_points, follow_result, sent_window = [], None, None
+                    guidance = RouteGuidance(route["reference_path"], position, goal_point)
+                    budget = ProgressBudget(planner_patience_s=policy.get("planner_patience_s", 0.0),
+                                            controller_patience_s=policy.get("controller_patience_s", 20.0))
+                    recovery_used = recovery
                 controller_id = self.controller_id()
                 if controller_used is not None and controller_id != controller_used:
                     self.stopping = True
@@ -676,11 +685,15 @@ class Executor(Node):
                         raise RuntimeError("Could not release controller at arrival")
                     if not await self.confirm_stop():
                         raise RuntimeError("Could not confirm robot stop at arrival")
+                    if self.hardware:
+                        await self.wait_for_arrival_confirmation(task_id)
                     if self.interrupted(task_id):
                         raise InterruptedError("Task canceled while stopping")
                     if not self.status(False)["ready"]:
                         raise RuntimeError("Localization or sensors lost at arrival")
                     stopped_pose = await self.wait_for_ready_pose(task_id)
+                    if self.hardware and getattr(self, "handled_recovery", 0) != recovery_used:
+                        continue
                     remaining = math.dist(
                         (stopped_pose["x"], stopped_pose["y"]),
                         (goal_point["x"], goal_point["y"]),
@@ -695,6 +708,8 @@ class Executor(Node):
                     # The estimate can move while braking. Resume planning rather
                     # than reporting arrival outside the unchanged tolerance.
                     current_points, follow_result = [], None
+                    if self.hardware:
+                        continue
                 if now - started_sim > 1800:
                     raise RuntimeError(
                         "Navigation exceeded the 1800 simulation-second task limit"
@@ -766,6 +781,8 @@ class Executor(Node):
                     command.path = path
                     command.controller_id = controller_id
                     command.goal_checker_id = "goal_checker"
+                    if self.hardware and (self.geo.get("fusion") or {}).get("recovery_id", 0) != getattr(self, "handled_recovery", 0):
+                        continue
                     pending = self.follow_client.send_goal_async(command)
                     follow_requests.append(pending)
 
