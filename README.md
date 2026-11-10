@@ -88,6 +88,14 @@ bash scripts/build.sh
 - `stop()`：停用并等待确认停车，恢复需要 Driver activate。
 - `costmap`：ROS2 全局传感器 OccupancyGrid，transient_local QoS；局部地图和执行路径也由执行节点发布。
 
+### 斜坡高度门限与楼梯避障
+
+雷达点的高度门限不再是一个固定下限。`cloud_min_height_near_m`（默认 0.2 米）按水平距离线性增加，到 `cloud_height_ramp_m`（默认 8 米）达到 `cloud_min_height_far_m`（默认 0.5 米）。这样近处仍能发现低障碍，远处上坡的路面不会因为抬高而被当成障碍。原来的 `cloud_min_height_m` 只为兼容旧配置保留，已不参与投影。
+
+过滤在投影成 LaserScan 之前完成，`cloud_height_filter` 只保留高于当前距离门限、且不超过 `cloud_max_height_m` 的点。上限必须高于远端门限，否则远处点会被上限整体删掉；默认已调整为 1.5 米，旧配置若仍写 0.3 需自行确认。
+
+`stairs_disable_obstacle_layer`（默认开启）在楼梯步态被请求（距区段 1 米、已开始重试或已确认）后，执行端向代价地图发布全为无穷远的扫描，清掉此前标记并停止用雷达新增障碍；离开楼梯步态后恢复原始扫描。看门狗仍读取未过滤的原始扫描，所以雷达掉线仍会触发原有停车，不是靠“没有障碍”放行。该行为只关闭雷达避障，定位/底盘/速度守卫不变；上下楼梯的实机效果未验收。
+
 ### 已标注路线的步态切换
 
 可选字段 `map_id`、`version`、`origin_wgs84` 必须一起提供；`intervals` 只能描述同一条 `reference_path` 的累计二维路程，按本次行进方向排序，不能复用另一条规划线的下标。每段至少有 `start_m/end_m/gait/gait_code`，支持 flat、stairs、unknown，实际反馈原码与标签必须一致。原始手动码 0x1001/0x1003 分别映射为导航目标 0x3002/0x3003。

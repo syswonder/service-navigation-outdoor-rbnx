@@ -16,7 +16,11 @@ DEFAULTS = {
     "max_angular_speed_rps": 0.4,
     "footprint_radius_m": 0.6,
     "cloud_min_height_m": -0.3,
-    "cloud_max_height_m": 0.3,
+    "cloud_max_height_m": 1.5,
+    "cloud_min_height_near_m": 0.2,
+    "cloud_min_height_far_m": 0.5,
+    "cloud_height_ramp_m": 8.0,
+    "stairs_disable_obstacle_layer": True,
     "scan_range_min_m": 0.5,
     "planner_patience_s": 60.0,
     "controller_patience_s": 60.0,
@@ -107,6 +111,9 @@ def validate(config, base=None):
         0 < policy["max_speed_mps"] <= 0.4
         and 0 < policy["max_angular_speed_rps"] <= 0.4
         and policy["cloud_min_height_m"] < policy["cloud_max_height_m"]
+        and 0 <= policy["cloud_min_height_near_m"] <= policy["cloud_min_height_far_m"]
+        and policy["cloud_height_ramp_m"] > 0
+        and policy["cloud_max_height_m"] > policy["cloud_min_height_near_m"]
         and 0 <= policy["scan_range_min_m"] < 8
         and 0 <= policy["planner_patience_s"] <= 300
         and 0 < policy["controller_patience_s"] <= 300

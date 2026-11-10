@@ -29,6 +29,22 @@ properties:
   velocity_output_topic:
     type: string
     default: /robonix/nomotion/outdoor_cmd_vel
+  cloud_min_height_near_m:
+    type: number
+    default: 0.2
+    description: Minimum point height at zero horizontal distance; grows with range.
+  cloud_min_height_far_m:
+    type: number
+    default: 0.5
+    description: Minimum point height reached at cloud_height_ramp_m and beyond.
+  cloud_height_ramp_m:
+    type: number
+    default: 8.0
+    description: Horizontal distance over which the minimum height rises from near to far.
+  stairs_disable_obstacle_layer:
+    type: boolean
+    default: true
+    description: Publish an infinite scan, clearing lidar marks, while a stair gait is requested.
   gait_switching_enabled:
     type: boolean
     default: false

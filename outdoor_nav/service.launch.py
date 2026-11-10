@@ -156,21 +156,45 @@ def nodes(context):
                 "-m",
                 "outdoor_nav.guard",
                 *rosargs,
+                "-r",
+                "/outdoor/scan:=/outdoor/raw_scan",
                 "-p",
                 "robot_config:=" + runtime_file,
+            ],
+            output="screen",
+        ),
+        ExecuteProcess(
+            cmd=[
+                worker_python,
+                "-m",
+                "outdoor_nav.cloud_height_filter",
+                "--ros-args",
+                "-r",
+                "cloud_in:=" + policy["cloud"],
+                "-p",
+                "near_m:=" + repr(robot["cloud_min_height_near_m"]),
+                "-p",
+                "far_m:=" + repr(robot["cloud_min_height_far_m"]),
+                "-p",
+                "ramp_m:=" + repr(robot["cloud_height_ramp_m"]),
+                "-p",
+                "max_m:=" + repr(robot["cloud_max_height_m"]),
             ],
             output="screen",
         ),
         Node(
             package="pointcloud_to_laserscan",
             executable="pointcloud_to_laserscan_node",
-            remappings=[("cloud_in", policy["cloud"]), ("scan", policy["scan"])],
+            remappings=[("cloud_in", "/outdoor/cloud_for_scan"),
+                         ("scan", "/outdoor/raw_scan")],
             parameters=[
                 {
                     "target_frame": "base_link",
                     "transform_tolerance": robot["transform_tolerance_s"],
-                    "min_height": robot["cloud_min_height_m"],
-                    "max_height": robot["cloud_max_height_m"],
+                    # Height gating happens in cloud_height_filter; keep the
+                    # projector's own band out of the way.
+                    "min_height": -1.0e6,
+                    "max_height": 1.0e6,
                     "range_min": robot["scan_range_min_m"]
                     or robot["footprint_radius_m"],
                     "range_max": 8.0,

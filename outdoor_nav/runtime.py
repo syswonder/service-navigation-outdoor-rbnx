@@ -29,6 +29,7 @@ from tf2_ros import Buffer, TransformListener
 from .configuration import load_runtime
 from .core.scan_health import healthy_scan
 from .core.gait import GaitSchedule, STAIRS
+from .core.scan_gate import gated_ranges, stairs_obstacle_off
 from .core.tasks import TaskStore, TERMINAL
 from .executor import Executor, LATCHED
 from .http import serve, ApiError
@@ -90,6 +91,10 @@ class OutdoorExecutor(Executor):
             for n in ("planner_server", "controller_server")
         }
         self.command_pub = self.create_publisher(Twist, "/outdoor/safe_command", 10)
+        self.raw_scan, self.raw_scan_at = None, -math.inf
+        self.scan_pub = self.create_publisher(
+            LaserScan, "/outdoor/scan", qos_profile_sensor_data
+        )
         self.gait_schedule = self.gait_task = None
         self.gait_pub = (self.create_publisher(UInt32, self.runtime["gait_output_topic"], 10)
                          if self.runtime.get("gait_switching_enabled", False) else None)
@@ -104,7 +109,7 @@ class OutdoorExecutor(Executor):
             (String, "/outdoor/localization", self.on_geo, 10),
             (String, "/outdoor/command_status", self.on_guard, 10),
             (String, "/outdoor/chassis_status", self.on_chassis, 10),
-            (LaserScan, "/outdoor/scan", self.on_scan, qos_profile_sensor_data),
+            (LaserScan, "/outdoor/raw_scan", self.on_scan, qos_profile_sensor_data),
         ):
             self.create_subscription(kind, name, callback, qos)
         self.server = ActionServer(
@@ -123,6 +128,7 @@ class OutdoorExecutor(Executor):
             (1.0, self.poll_lifecycle),
             (0.1, self.check_stationary),
             (0.1, self.gait_tick),
+            (0.1, self.scan_gate_tick),
         ):
             self.create_timer(
                 interval, callback, clock=self.steady, callback_group=self.group
@@ -261,12 +267,45 @@ class OutdoorExecutor(Executor):
             setattr(self, name, {})
 
     def on_scan(self, msg):
+        self.raw_scan, self.raw_scan_at = msg, time.monotonic()
         if healthy_scan(
             msg,
             self.get_clock().now().nanoseconds / 1e9,
             self.config["sensor_timeout_s"],
         ):
             self.mark("lidar")
+
+    def stairs_active(self):
+        task = self.tasks.snapshot(self.owner, include_paths=False) if self.owner else None
+        return stairs_obstacle_off(
+            (task or {}).get("gait_status"),
+            self.config["stairs_disable_obstacle_layer"],
+        )
+
+    def scan_gate_tick(self):
+        """Stair treads look like obstacles; stop feeding them to the costmap.
+
+        The guard still reads the raw scan, so losing the lidar keeps its
+        existing readiness failure. An infinite scan clears earlier marks on
+        entry rather than freezing the last stair edge in the costmap.
+        """
+        raw = self.raw_scan
+        if raw is None:
+            return
+        stairs = self.stairs_active()
+        fresh = time.monotonic() - self.raw_scan_at < self.config["sensor_timeout_s"]
+        message = LaserScan()
+        message.header = raw.header
+        message.angle_min, message.angle_max = raw.angle_min, raw.angle_max
+        message.angle_increment = raw.angle_increment
+        message.time_increment = raw.time_increment
+        message.scan_time = raw.scan_time
+        message.range_min, message.range_max = raw.range_min, raw.range_max
+        suppress = stairs or not fresh
+        message.ranges = gated_ranges(raw.ranges, suppress)
+        if not suppress:
+            message.intensities = raw.intensities
+        self.scan_pub.publish(message)
 
     def status(self, include_task=True):
         now = time.monotonic()
@@ -329,6 +368,7 @@ class OutdoorExecutor(Executor):
             "new_task_ready": g.get("grade") in ("fixed", "float") and all(health.values()),
             "coordinate_reference": g.get("coordinate_reference"),
             "gait_status": owned.get("gait_status") if owned else None,
+            "obstacles_from_lidar": not self.stairs_active(),
             "gait_switching_enabled": self.runtime.get("gait_switching_enabled", False),
             "local_avoidance_enabled": not self.owner or self.controller_id() == "FollowPath",
             "heading": g.get("heading"),
