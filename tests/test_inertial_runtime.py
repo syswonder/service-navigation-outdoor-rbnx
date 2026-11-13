@@ -54,3 +54,20 @@ def test_arrival_waits_for_rtk_and_handles_cancel():
     n.interrupted.return_value = True
     with pytest.raises(InterruptedError):
         asyncio.run(OutdoorExecutor.wait_for_arrival_confirmation(n, "task"))
+
+
+def test_stop_failure_recovers_only_after_release_and_standstill():
+    n = S(stop_failure='unverified stop', stop_recovery=([], {}), owner=None,
+          stop_recovering=False, clock_rewound=False, startup_stopped=False,
+          release_controller=AsyncMock(return_value=False),
+          confirm_stop=AsyncMock(return_value=True))
+    asyncio.run(OutdoorExecutor.recover_stop(n))
+    assert n.stop_failure and not n.startup_stopped
+    n.confirm_stop.assert_not_awaited()
+    n.release_controller.return_value = True
+    n.confirm_stop.return_value = False
+    asyncio.run(OutdoorExecutor.recover_stop(n))
+    assert n.stop_failure
+    n.confirm_stop.return_value = True
+    asyncio.run(OutdoorExecutor.recover_stop(n))
+    assert n.stop_failure is None and n.stop_recovery is None and n.startup_stopped

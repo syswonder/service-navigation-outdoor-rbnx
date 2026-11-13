@@ -80,7 +80,7 @@ class Watchdog(Node):
             "diagnostic_mode": not self.diagnostic,
             "motion_disabled": self.config["motion_enabled"],
             "localization_unready": self.ready,
-            "localization_stale": now - self.geo_at < self.config["sensor_timeout_s"],
+            "localization_stale": now - self.geo_at < self.config.get("localization_timeout_s", 3.0),
             "scan_stale": now - self.scan_at < self.config["sensor_timeout_s"],
             "command_stale": now - self.command_at < self.config["command_timeout_s"],
         }

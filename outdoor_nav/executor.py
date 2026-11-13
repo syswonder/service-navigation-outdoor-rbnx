@@ -26,7 +26,7 @@ from tf2_ros import Buffer, TransformListener
 from unique_identifier_msgs.msg import UUID
 
 from .http import ApiError, serve
-from .core.guidance import RouteGuidance, validate_point
+from .core.guidance import RouteGuidance, validate_point, free_via_point, observed_obstacle
 from .core.tasks import TaskStore, TERMINAL, ProgressBudget
 from .core.scan_health import healthy_scan
 from rclpy.parameter import Parameter
@@ -202,7 +202,7 @@ class Executor(Node):
         age = self.get_clock().now().nanoseconds / 1e9 - stamp
         t = msg.twist.twist
         if not -0.1 <= age < (
-            self.config["sensor_timeout_s"] if self.hardware else 1
+            self.config.get("localization_timeout_s", 3.0) if self.hardware else 1
         ) or not all(math.isfinite(v) for v in (t.linear.x, t.linear.y, t.angular.z)):
             return
         self.velocity = (math.hypot(t.linear.x, t.linear.y), abs(t.angular.z))
@@ -408,7 +408,7 @@ class Executor(Node):
                 and all(math.isfinite(position[k]) for k in ("x", "y", "yaw"))
                 and 0
                 <= position.get("age_s", math.inf)
-                < getattr(self, "config", {}).get("sensor_timeout_s", 1.0)
+                < getattr(self, "config", {}).get("pose_timeout_s", 3.0)
             ):
                 self.stopping = was_stopping
                 return position
@@ -429,18 +429,23 @@ class Executor(Node):
                 )
             if time.monotonic() >= deadline:
                 raise RuntimeError(
-                    "Position or navigation unavailable after %.1f s; stopped" % timeout
+                    "Navigation recovery timed out after %.1f s (%s); stopped"
+                    % (timeout, ", ".join(status.get("not_ready_reasons", [])))
                 )
             await self.pause(0.1)
 
     async def result(self, future, task_id, timeout=10):
-        began = self.get_clock().now().nanoseconds / 1e9
+        began = time.monotonic()
         while not future.done():
             if self.interrupted(task_id):
                 raise InterruptedError("Task canceled or superseded")
             if not self.status(False)["ready"]:
+                paused = time.monotonic()
                 await self.wait_for_ready_pose(task_id)
-            if self.get_clock().now().nanoseconds / 1e9 - began > timeout:
+                began += time.monotonic()-paused
+            if future.done():
+                break
+            if time.monotonic() - began > timeout:
                 raise RuntimeError("Nav2 action timed out")
             await self.pause()
         if self.interrupted(task_id):
@@ -454,7 +459,7 @@ class Executor(Node):
             now = time.monotonic()
             stopped = (
                 time.monotonic() - self.velocity_at
-                < (self.config["sensor_timeout_s"] if self.hardware else 1)
+                < (self.config.get("localization_timeout_s", 3.0) if self.hardware else 1)
                 and self.velocity[0]
                 <= (
                     self.config.get("stopped_linear_mps", 0.01)
@@ -523,8 +528,12 @@ class Executor(Node):
         path.header.frame_id = "map"
         path.header.stamp = self.get_clock().now().to_msg()
         start = validate_point(position)
+        window = list(window)
+        skipped = set()
         for offset, index in enumerate(window):
             point = guidance.points[index]
+            if index != len(guidance.points) - 1:
+                point = free_via_point(point, self.global_map)
             request = ComputePathToPose.Goal()
             request.goal.header = path.header
             request.goal.pose.position.x = point["x"]
@@ -553,6 +562,21 @@ class Executor(Node):
                 # A coincident destination still needs a path for final heading alignment.
                 leg = [request.start, *leg]
             if result.status != GoalStatus.STATUS_SUCCEEDED or len(leg) < 2:
+                now_s = self.get_clock().now().nanoseconds / 1e9
+                if (index < len(guidance.points)-1
+                        and self.scan is not None
+                        and healthy_scan(self.scan, now_s, self.config['sensor_timeout_s'])
+                        and observed_obstacle(guidance.points[index], self.global_map,
+                                              position, now_s, scan=self.scan)):
+                    next_index = index+1
+                    next_point = guidance.points[next_index]
+                    if (len(window) < 12
+                            and math.hypot(next_point['x']-position['x'],
+                                           next_point['y']-position['y']) <= 6.0):
+                        if offset+1 == len(window):
+                            window.append(next_index)
+                        skipped.add(index)
+                        continue
                 # A sampled station may itself be occupied. Try the next station
                 # on the SAME straight edge, allowing NavFn to go around it.
                 # Never skip a bend or the window/final goal to obtain a shortcut.
@@ -575,6 +599,9 @@ class Executor(Node):
             end = path.poses[-1].pose.position
             start = {"x": end.x, "y": end.y}
         # Intermediate leg-end orientations must not make the controller stop.
+        # Commit skipped stations only after a complete obstacle-aware path
+        # to a later station succeeds; a failed detour must not advance progress.
+        guidance.skipped.update(skipped)
         for a, b in zip(path.poses, path.poses[1:]):
             heading = math.atan2(
                 b.pose.position.y - a.pose.position.y,
@@ -843,8 +870,9 @@ class Executor(Node):
                 if not released or not stopped:
                     self.stop_failure = (
                         ((reason + "; ") if reason else "")
-                        + "Could not confirm controller release and robot stop; restart required"
+                        + "Could not confirm controller release and robot stop; waiting for verified stop"
                     )
+                    self.stop_recovery = (follow_requests, follow_results)
                     outcome, reason = "failed", self.stop_failure
                 self.tasks.update(
                     task_id,

@@ -3,6 +3,11 @@
 import numpy as np
 
 
+def body_band(near_m, far_m, max_m, lidar_height_m):
+    """Convert ground-relative heights to the lidar-centred body frame."""
+    return near_m - lidar_height_m, far_m - lidar_height_m, max_m - lidar_height_m
+
+
 def graded_minimum(distance_sq, near_m, far_m, ramp_m):
     """Minimum accepted height at each horizontal distance in metres."""
     distance = np.sqrt(distance_sq)

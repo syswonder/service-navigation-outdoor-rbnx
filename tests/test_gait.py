@@ -79,6 +79,16 @@ def test_nearby_stairs_merge_and_parallel_road_does_not_skip_progress():
     assert route.update({"x":4.,"y":0.}) == 5.
 
 
+def test_rounded_corner_advances_without_skipping_to_a_distant_parallel_road():
+    route = RouteStation([{"x": 0., "y": 0.}, {"x": 3., "y": 0.},
+                          {"x": 3., "y": 2.}, {"x": 6., "y": 2.}])
+    route.update({"x": 2.8, "y": 0.})
+    assert route.update({"x": 2.85, "y": 0.4}) == pytest.approx(3.4)
+    route.update({"x": 3., "y": 1.8})
+    assert route.update({"x": 3.4, "y": 1.85}) == pytest.approx(5.4)
+    assert route.update({"x": 5., "y": 2.}) == pytest.approx(7.)
+
+
 def test_sensor_approach_is_validated_and_stairs_shift_with_its_length():
     node,_=task_node()
     reference=[{'x':-3.,'y':0.},{'x':0.,'y':0.},{'x':0.,'y':5.},{'x':0.,'y':8.}]
@@ -163,3 +173,15 @@ def test_worker_stops_until_actual_feedback_and_controller_match(monkeypatch):
     node.tasks.cancel(task["task_id"])
     OutdoorExecutor.gait_tick(node)
     assert sent == [STAIRS] and node.gait_schedule is None
+
+
+def test_prepare_and_confirmation_have_separate_deadlines():
+    schedule = GaitSchedule(REFERENCE, INTERVALS)
+    assert tick(schedule, 5., 0., stopped=False)[0] is None
+    assert not tick(schedule, 5., 8., stopped=False)[1]['failed']
+    assert tick(schedule, 5., 9.)[0] == STAIRS
+    assert not tick(schedule, 5., 13.)[1]['failed']
+    assert tick(schedule, 5., 14.)[1]['reason'] == 'gait_switch_timeout'
+    waiting = GaitSchedule(REFERENCE, INTERVALS)
+    tick(waiting, 5., 0., eligible=False)
+    assert tick(waiting, 5., 15., eligible=False)[1]['reason'] == 'gait_prepare_timeout'

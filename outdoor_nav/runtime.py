@@ -19,7 +19,7 @@ from rclpy.action import ActionClient, ActionServer, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.clock import Clock, ClockType
 from rclpy.executors import MultiThreadedExecutor
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import QoSProfile, qos_profile_sensor_data
 from rclpy.parameter import Parameter
 from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import LaserScan
@@ -53,7 +53,11 @@ class OutdoorExecutor(Executor):
         self.group = ReentrantCallbackGroup()
         self.steady = Clock(clock_type=ClockType.STEADY_TIME)
         self.tf = Buffer()
-        self.tf_listener = TransformListener(self.tf, self)
+        # Pose readiness needs current transforms; a long queue can keep this
+        # listener seconds behind the broadcaster under concurrent callbacks.
+        self.tf_node = Node("outdoor_execution_tf")
+        self.tf_listener = TransformListener(
+            self.tf, self.tf_node, spin_thread=True, qos=QoSProfile(depth=1))
         self.tasks = TaskStore(journal=Path(self.runtime["run_dir"]) / "tasks.json")
         self.stats, self.lifecycle, self.lifecycle_pending = {}, {}, set()
         self.clock_value, self.clock_changed = None, 0.0
@@ -64,6 +68,8 @@ class OutdoorExecutor(Executor):
         self.velocity, self.velocity_at = (math.inf, math.inf), 0.0
         self.owner, self.stopping = None, True
         self.stop_failure = None
+        self.stop_recovery = None
+        self.stop_recovering = False
         self.handles, self.requests, self.cancel_sent = {}, {}, set()
         self.state_lock = threading.RLock()
         self.geo, self.geo_at = {}, -math.inf
@@ -135,6 +141,7 @@ class OutdoorExecutor(Executor):
             (0.05, self.safety_tick),
             (0.1, self.dispatch),
             (1.0, self.poll_lifecycle),
+            (1.0, self.recover_stop),
             (0.1, self.check_stationary),
             (0.1, self.gait_tick),
             (0.1, self.scan_gate_tick),
@@ -154,7 +161,7 @@ class OutdoorExecutor(Executor):
     def check_stationary(self):
         now = time.monotonic()
         stopped = (
-            now - self.velocity_at < self.config["sensor_timeout_s"]
+            now - self.velocity_at < self.config.get("localization_timeout_s", 3.0)
             and self.velocity[0] <= self.config["stopped_linear_mps"]
             and self.velocity[1] <= self.config["stopped_angular_rps"]
         )
@@ -169,6 +176,21 @@ class OutdoorExecutor(Executor):
         ):
             self.startup_stopped = True
 
+    async def recover_stop(self):
+        # Recover readiness only; the failed task remains failed.
+        if (not self.stop_failure or self.stop_recovery is None or self.owner is not None
+                or self.stop_recovering or self.clock_rewound):
+            return
+        self.stop_recovering = True
+        try:
+            requests, results = self.stop_recovery
+            if await self.release_controller(requests, results) and await self.confirm_stop():
+                self.stop_failure = None
+                self.stop_recovery = None
+                self.startup_stopped = True
+        finally:
+            self.stop_recovering = False
+
     def gait_tick(self):
         with self.state_lock:
             task = self.tasks.snapshot(self.owner) if self.owner else None
@@ -181,7 +203,7 @@ class OutdoorExecutor(Executor):
                 self.gait_schedule = GaitSchedule(task["reference_path"], task["intervals"])
                 self.gait_task = task["task_id"]
             position = self.pose()
-            if position is None or not 0 <= position["age_s"] < self.config["sensor_timeout_s"]:
+            if position is None or not 0 <= position["age_s"] < self.config.get("pose_timeout_s", 3.0):
                 return
             now, body = time.monotonic(), self.chassis
             motion_age = body.get("motion_feedback_age_s")
@@ -198,8 +220,9 @@ class OutdoorExecutor(Executor):
                 position, now, body.get("gait"), max(motion_age, received_age), eligible,
                 stopped=(self.stationary_since is not None
                          and now-self.stationary_since >= self.config["stop_hold_s"]
-                         and now-self.velocity_at < self.config["sensor_timeout_s"]),
-                timeout_s=self.config["gait_switch_timeout_s"])
+                         and now-self.velocity_at < self.config.get("localization_timeout_s", 3.0)),
+                timeout_s=self.config["gait_switch_timeout_s"],
+                prepare_timeout_s=self.config.get("gait_prepare_timeout_s", 15.))
             if command is not None:
                 self.gait_pub.publish(UInt32(data=command))
             self.tasks.update(task["task_id"], gait_status=status)
@@ -328,7 +351,7 @@ class OutdoorExecutor(Executor):
         }
         health.update(
             localization=continuation_allowed(g, owned, c["allow_float_during_fixed_task"])
-            and now-self.geo_at < t,
+            and now-self.geo_at < c.get('localization_timeout_s', 3.0),
             heading=bool(g.get("heading", {}).get("ready"))
             if c["heading_source"] == "wit_imu"
             else True,
@@ -353,7 +376,7 @@ class OutdoorExecutor(Executor):
                 if c["localization_mode"] == "rtk_imu"
                 else c["odometry_confirmed"]
             )
-            and now - self.velocity_at < t,
+            and now - self.velocity_at < c.get("localization_timeout_s", 3.0),
             actions=self.path_client.server_is_ready()
             and self.follow_client.server_is_ready(),
             exclusive_owners=not g.get("ownership_conflict", False)
@@ -365,7 +388,7 @@ class OutdoorExecutor(Executor):
             value, stamp = self.lifecycle.get(name, (False, 0.0))
             health[name] = value and now - stamp < 5
         pose = self.pose()
-        health["tf"] = pose is not None and pose["age_s"] < t
+        health["tf"] = pose is not None and pose["age_s"] < c.get("pose_timeout_s", 3.0)
         return {
             "schema_version": 1,
             "ready": all(health.values()),
@@ -386,7 +409,7 @@ class OutdoorExecutor(Executor):
             "measured_velocity": list(self.velocity)
             if all(math.isfinite(v) for v in self.velocity)
             else None,
-            "velocity_fresh": now - self.velocity_at < t,
+            "velocity_fresh": now - self.velocity_at < c.get("localization_timeout_s", 3.0),
             "task": self.tasks.snapshot() if include_task else None,
         }
 
@@ -477,7 +500,11 @@ class OutdoorExecutor(Executor):
         else:
             path = self.stairs_path(guidance, window, position)
         goal = self.tasks.snapshot(task_id)["goal"]
-        if path and path.poses and window[-1] == len(guidance.points)-1 and "yaw" in goal:
+        endpoint = path.poses[-1].pose.position if path and path.poses else None
+        reaches_final = (endpoint is not None and math.hypot(
+            endpoint.x-guidance.points[-1]['x'], endpoint.y-guidance.points[-1]['y'])
+            <= self.config.get('planner_tolerance_m', .2)+.01)
+        if reaches_final and "yaw" in goal:
             q = path.poses[-1].pose.orientation
             q.z, q.w = math.sin(goal["yaw"]/2), math.cos(goal["yaw"]/2)
         return path
@@ -525,6 +552,8 @@ def main():
             executor.spin_once(timeout_sec=0.1)
     finally:
         executor.shutdown(timeout_sec=20)
+        node.tf_listener.executor.shutdown()
+        node.tf_listener.dedicated_listener_thread.join()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

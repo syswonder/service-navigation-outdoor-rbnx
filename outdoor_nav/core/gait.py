@@ -62,7 +62,8 @@ class RouteStation:
             lateral = abs(px * dy - py * dx) / math.hypot(dx, dy)
             current = projection(point, [a, b])
             following = projection(point, [b, c])
-            turning = (distance(point, b) <= 0.3
+            # A controller rounds corners; it need not pass through the vertex.
+            turning = (distance(point, b) <= 0.75
                        and following["distance_m"] < current["distance_m"])
             if not ((crossed and lateral <= 1.5) or turning):
                 break
@@ -89,6 +90,7 @@ class GaitSchedule:
         self.target = None
         self.last_sent, self.attempts = -math.inf, 0
         self.switch_started = None
+        self.prepare_started = None
         self.failed = False
 
     def desired(self, station):
@@ -100,25 +102,32 @@ class GaitSchedule:
                 return FLAT if item["gait"] == "flat" else None
         return None
 
-    def tick(self, position, now, actual, feedback_age_s, eligible, stopped=False, timeout_s=10.):
+    def tick(self, position, now, actual, feedback_age_s, eligible, stopped=False, timeout_s=5., prepare_timeout_s=15.):
         station = self.route.update(position)
         target = self.desired(station)
         if target != self.target:
             self.target, self.last_sent, self.attempts = target, -math.inf, 0
-            self.switch_started = None
+            self.switch_started = self.prepare_started = None
         fresh = math.isfinite(feedback_age_s) and 0 <= feedback_age_s < 1.
         confirmed = target is not None and fresh and actual == target
-        if not confirmed and self.switch_started is None:
-            self.switch_started = now
         if confirmed:
-            self.switch_started = None
-        if target is None or (self.switch_started is not None and now-self.switch_started >= timeout_s):
+            self.switch_started = self.prepare_started = None
+        elif self.prepare_started is None:
+            self.prepare_started = now
+        preparing_expired = (self.switch_started is None and self.prepare_started is not None
+                             and now - self.prepare_started >= prepare_timeout_s)
+        confirmation_expired = (self.switch_started is not None
+                                and now - self.switch_started >= timeout_s)
+        if target is None or preparing_expired or confirmation_expired:
             self.failed = True
         command = None
         if not self.failed and not confirmed and eligible and stopped and now - self.last_sent >= 1.:
             command, self.last_sent = target, now
+            if self.switch_started is None:
+                self.switch_started = now
             self.attempts += 1
         reason = ("unknown_route_gait" if target is None else
+                  "gait_prepare_timeout" if self.failed and preparing_expired else
                   "gait_switch_timeout" if self.failed else
                   None if confirmed else
                   "stopping_before_gait_switch" if not stopped else

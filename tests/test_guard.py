@@ -39,7 +39,7 @@ def fixture():
         ("conflict", True),
         ("diagnostic", True),
         ("ready", False),
-        ("geo_at", 8.0),
+        ("geo_at", 6.9),
         ("scan_at", 8.0),
         ("command_at", 9.0),
     ],
@@ -87,3 +87,11 @@ def test_guard_logic_matches_original():
     )
     for name in ("check_owners", "receive", "geo", "scan", "tick", "destroy_node"):
         assert old[name] == new[name], name
+
+
+def test_localization_has_three_seconds_but_command_and_scan_stay_fresh():
+    n = fixture()
+    n.geo_at = 7.1
+    with patch("outdoor_nav.guard.time.monotonic", return_value=10.0):
+        Watchdog.tick(n)
+    assert n.pub.publish.call_args.args[0].linear.x == .2
