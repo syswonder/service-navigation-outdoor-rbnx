@@ -65,6 +65,11 @@ TOPICS = {
     "camera_ground": "/outdoor/direct_nav/observed_ground",
     "camera_status": "/outdoor/direct_nav/depth_status",
     "camera_semantics": "/outdoor/vision/current_grid",
+    "camera_road_mask": "/outdoor/vision/road_mask",
+    "camera_labels": "/outdoor/vision/semantic_labels",
+    "camera_confidence": "/outdoor/vision/semantic_confidence",
+    "camera_segmentation_status": "/semantic/segmentation_status",
+    "camera_overlay": "/semantic/debug_overlay",
     "camera_costmap": "/outdoor/vision/filtered_costmap",
     "camera_scan": "/outdoor/camera_scan",
     "cloud": "/airy_201/points",
@@ -97,7 +102,7 @@ def validate(config, base=None):
         if not isinstance(config.get(field, {}), dict):
             raise ValueError(field + " must be a mapping")
     providers = config.get("provider_ids", {})
-    if set(providers) - {"cloud", "odom", "localization", "chassis"} or any(not isinstance(v, str) for v in providers.values()):
+    if set(providers) - {"cloud", "odom", "localization", "chassis", "camera"} or any(not isinstance(v, str) for v in providers.values()):
         raise ValueError("Unknown provider role or non-string provider id")
     if type(config.get("http_port", 19975)) is not int or not 1024 <= config.get("http_port", 19975) <= 65535:
         raise ValueError("http_port must be an integer in [1024, 65535]")
@@ -179,6 +184,8 @@ def validate(config, base=None):
         raise ValueError("Unknown topic role")
     for value in bindings.values():
         topic(value)
+    if len({bindings[k] for k in ('camera_rgb', 'camera_road_mask', 'camera_labels', 'camera_confidence', 'camera_overlay')}) != 5:
+        raise ValueError('Camera RGB and segmentation outputs must use distinct topics')
     if bindings["camera_obstacles"] != "/outdoor/direct_nav/visual_obstacles":
         raise ValueError("Original depth node requires its guarded outdoor observation endpoint")
     if len({bindings[k] for k in ("cloud", "scan", "camera_scan", "camera_costmap", "camera_obstacles", "camera_ground", "camera_status")}) != 7:

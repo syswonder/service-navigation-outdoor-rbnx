@@ -1,4 +1,4 @@
-"""Original RGB-D/RTAB-Map/PIDNet nodes, with deployment-only bindings."""
+"""Original RGB-D geometry and optional segmentation, with deployment bindings."""
 from launch.actions import ExecuteProcess
 from launch_ros.actions import Node
 
@@ -21,7 +21,7 @@ def vision_nodes(runtime, python, rosargs):
               "/direct_nav/rtabmap/input": "/outdoor/vision/rtabmap/input",
               "/direct_nav/rtabmap/ground": "/outdoor/vision/rtabmap/ground",
               "/direct_nav/rtabmap/obstacles": "/outdoor/vision/rtabmap/obstacles",
-              "/semantic/road_mask": "/outdoor/vision/road_mask",
+              "/semantic/road_mask": t["camera_road_mask"],
               "/semantic/current_grid": t["camera_semantics"],
               "/semantic/local_grid": "/outdoor/vision/semantic_grid"}
     args = [v for a, b in remaps.items() for v in ("-r", a+":="+b)]
@@ -38,6 +38,9 @@ def vision_nodes(runtime, python, rosargs):
                       max_data_age=p["sensor_timeout_s"])
     import json
     segmentation = dict(config_json=json.dumps(runtime["semantic_segmentation"]),
+                        rgb_topic=t["camera_rgb"], mask_topic=t["camera_road_mask"],
+                        labels_topic=t["camera_labels"], confidence_topic=t["camera_confidence"],
+                        status_topic=t["camera_segmentation_status"], overlay_topic=t["camera_overlay"],
                         max_image_age=p["sensor_timeout_s"])
     children = []
     optional = []

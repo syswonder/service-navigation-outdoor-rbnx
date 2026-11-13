@@ -11,6 +11,7 @@ dependencies = ["numpy<2", "PyYAML>=6", "Pillow>=9", "scipy>=1.8", "shapely>=2,<
 
 [project.optional-dependencies]
 robonix = ["mcp>=1.27,<2.0.dev0", "fastmcp>=3,<4"]
+segformer = ["torch>=2.2,<3", "transformers>=4.40,<5"]
 
 [tool.setuptools.packages.find]
 include = ["outdoor_nav*"]

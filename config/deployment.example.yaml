@@ -28,6 +28,11 @@ service:
         transform_tolerance_s: 0.2
       semantic_segmentation:
         enabled: false
+        backend: "" # importable module:factory
+        weights: "" # existing weights file or directory; adapter validates format
+        classes: {} # model ID -> class name, including slopes/stairs if supported
+        road_classes: [] # class names used for the existing road preference mask
+        options: {}
       policy:
         lidar_enabled: true
         camera_enabled: false

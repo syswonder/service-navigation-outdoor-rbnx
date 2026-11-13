@@ -1,6 +1,6 @@
 # Outdoor navigation service for Robonix
 
-此视觉版本位于 `feat/vision-multisensor-navigation` 分支，包含原 RGB-D / RTAB-Map / PIDNet 链路及检测后稳定性过滤。现有使用者可继续使用 `main`；采用视觉版本时，在部署 manifest 中显式选择此分支，并按下文安装视觉依赖、配置完整 Nav2 参数。
+此视觉版本位于 `feat/vision-multisensor-navigation` 分支，包含原 RGB-D / RTAB-Map / 可选语义分割 链路及检测后稳定性过滤。现有使用者可继续使用 `main`；采用视觉版本时，在部署 manifest 中显式选择此分支，并按下文安装视觉依赖、配置完整 Nav2 参数。
 
 ## 部署参数约定
 
@@ -15,7 +15,7 @@
 相机链路沿用 xiangruicheng 当前 geometry_assisted/rtabmap 实现：
 配准 RGB/深度/CameraInfo 检查 -> 原地面参考估计 -> RTAB-Map 法向量/聚类 ->
 原离地 0.10m 正障碍及负障碍复核 -> visual_obstacles + observed_ground + depth_status。
-PIDNet-M -> road/sidewalk 掩码（置信度 0.7）-> 原语义投影，作为辅助偏好。
+可替换语义模型 -> 完整类别图和置信度；按配置生成道路掩码 -> 原语义投影，作为辅助偏好。
 原检测源码按文件保留在 vendor/，没有使用先前的固定高度裁切替代检测器。
 
 新增过滤只位于原检测输出之后。先按同一采集时刻配对障碍、地面和有效状态，
@@ -37,30 +37,64 @@ policy:
   camera_enabled: true
   camera_frame_confirmed: false # 必须实测确认配准和外参
 semantic_segmentation:
-  enabled: true
-  backend: pidnet # 内置示例，也可替换为 your_package.road:create_backend
-  weights: assets/PIDNet_M_Cityscapes_test.pt # 必须先下载
+  enabled: false
+  backend: "" # 安装适配器后填写 your_package.model:create_backend
+  weights: "" # 权重文件或目录；格式由适配器检查
   device: auto
   confidence_threshold: 0.7
-  options:
-    architecture: pidnet-m
+  classes: {} # 模型原始类别编号 -> 类别名称
+  road_classes: [] # classes 中参与道路软代价的类别名称
+  options: {} # 原样传给适配器的模型专用配置
 ```
 
-### 权重下载与可替换模型接口
+### 可替换模型接口与权重
 
-PIDNet 官方已公告旧单文件链接失效，请使用 [作者更新的权重下载目录](https://drive.google.com/drive/folders/0BySIOtxxULinfjlGdGFiT3NQVUdLVDBxWnhhTjB4VXNBRkFOa281WHlkektYY2VBcWVZb1k?resourcekey=0-w0JIXUekD-FCW-Rm1Z-HfQ&usp=sharing)，选择 Cityscapes 的 `PIDNet_M_Cityscapes_test.pt`，匹配 `architecture: pidnet-m`。[官方说明](https://github.com/XuJiacong/PIDNet)。链接来自官方，下载权限由提供方管理。
+当前默认模型、权重和类别表暂时留空，不附带或自动下载任何模型。
+开启时缺少适配器、权重路径或类别表会报错，并提示本文；关闭时不导入模型依赖。
+模型的来源、权重下载地址和许可由所选适配器提供，不沿用旧模型的许可结论。
 
-通用接口位于 `outdoor_nav/segmentation.py`。其他模型设置 `backend: your_package.road:create_backend`，模块需安装到服务使用的 Python 环境。工厂签名为 `create_backend(*, weights, device, options)`，返回具有 `predict(rgb)` 方法的对象。
+通用接口位于 `outdoor_nav/segmentation.py`。`backend` 只接受 `模块:工厂函数`，
+模块需安装到导航 worker 使用的 Python 环境。工厂签名为
+`create_backend(*, weights, device, options)`，返回具有 `predict(rgb)` 方法的对象。
+`weights` 支持文件或目录；通用层只检查路径存在且为文件/目录，文件格式、目录完整性和模型兼容性由适配器检查。
 
-- 输入：原尺寸 `H×W×3`、`uint8`、RGB 图像。
-- 返回 `(mask, confidence)`，均为原尺寸 `H×W`，必须恢复缩放或裁剪后的像素对应关系。
-- `mask` 为 `uint8`：`1` 道路（可按模型适配加入人行道）、`0` 非道路、`255` 未知。原模型类别编号仅在适配器内转换。
-- `confidence` 为 `[0,1]` 有限概率；服务将低置信度像素置为未知，拒绝不合法输出。
-- ROS 输出 `/outdoor/vision/road_mask`（`sensor_msgs/Image`、`mono8`）保留输入时间戳/坐标系；状态为 `/semantic/segmentation_status`。后续投影与融合不识别具体模型名称。
+- 输入：原尺寸 `H×W×3`、`uint8`、RGB 图像；核心不固定输入尺寸或预处理方法。
+- 返回 `(labels, confidence)`：均为原尺寸 `H×W`，适配器负责恢复缩放、裁剪后的像素对应关系。
+- `labels`：整数类别编号 `0..65534`，`65535` 保留为未知。编号与含义由 `classes` 明确配置；未声明或低置信度像素变为未知。
+- `confidence`：`float32/float64`，有限概率 `[0,1]`；非法输出、过期帧和像素尺寸不一致均拒绝。
+- 例如某模型输出 `{7: road, 12: slope, 23: stairs}`，可以配置 `road_classes: [road]`。编号仅为接口示例，不是任何默认模型的类别表。
+- 更换模型只需更换适配器、权重、类别表及 `options`；不修改几何检测、时间稳定过滤或 costmap 合并代码。
 
-语义只提供已知地面的软代价。推理故障、过期结果退回几何链路；关闭时不启动推理或语义投影。旧 `pidnet_weights`、`pidnet_device`、`policy.pidnet_enabled` 已移除，改用通用配置。PIDNet 模型代码仅作为可选适配器保留。
+以下均为包内部 ROS 2 话题，可通过 `topic_remap` 配置，不新增对外 Robonix 能力约定：
 
-需安装原链路依赖 RTAB-Map、SciPy、Shapely 2、OpenCV、message_filters 。只有选择 PIDNet 适配器时需要兼容 PyTorch。
+| 参数 | 默认话题 | 消息 |
+| --- | --- | --- |
+| `camera_labels` | `/outdoor/vision/semantic_labels` | `sensor_msgs/Image`, `mono16`，保留完整类别 |
+| `camera_confidence` | `/outdoor/vision/semantic_confidence` | `sensor_msgs/Image`, `32FC1` |
+| `camera_road_mask` | `/outdoor/vision/road_mask` | `sensor_msgs/Image`, `mono8`：0 非道路、1 道路、255 未知 |
+| `camera_segmentation_status` | `/semantic/segmentation_status` | `std_msgs/String` JSON，包含类别表、未知编号、源时间戳、状态 |
+| `camera_overlay` | `/semantic/debug_overlay` | `sensor_msgs/Image`, `rgb8` |
+
+三张输出图像保留原 RGB 的时间戳和坐标系。斜坡、楼梯等类别不会被压成道路后丢失，
+但当前完整类别图只提供识别结果；本轮未实现基于三维坡度、阶高和底盘能力的可通行判定。
+`road_classes` 仅影响几何已知地面的软代价，不能清除相机或雷达障碍，也不触发步态切换。
+推理故障或过期结果按原有语义时效退出，几何链路继续工作；关闭语义时不启动推理和投影。
+
+旧 PIDNet 专用配置和内置模型加载分支已移除，历史源码与验证材料归档到忽略的 `local_only/legacy_pidnet/`。
+
+### 可选 SegFormer 适配器
+
+设置 `backend: outdoor_nav.segformer_backend:create_backend`，并在导航 worker 的 Python 环境中安装本包的 `[segformer]` 可选依赖（例如 `python -m pip install '.[segformer]'`）。Jetson 应安装适配其 JetPack 的 PyTorch，再安装匹配的 Transformers；不启用此适配器时无需安装这些依赖。
+
+此适配器要求 `weights` 为本地 Hugging Face `save_pretrained` 目录，包含模型权重（如 `model.safetensors`）、`config.json` 和 `preprocessor_config.json`。模型与图像处理器均须保存；仅有单独 `.pth` 文件不能直接使用此适配器。加载使用 `local_files_only=True`，缺失文件会报错，不在线补下载。
+
+图像缩放、重采样、归一化等设置读取 `preprocessor_config.json`，不得用固定 ImageNet 参数替代训练时配置。当前适配器要求预处理保留完整视野，拒绝 crop/pad 配置；推理 logits 恢复原图尺寸后计算 softmax，返回原始类别编号和对应最大概率。`do_reduce_labels` 用于训练标签处理，不对预测类别再次减一。`options` 当前须为 `{}`。
+
+根据所选权重的实际类别表填写 `classes` 和 `road_classes`，不要复制其他权重的编号。适配器不做二值化、不提供 `last_stairs`，所有类别走同一个输出接口。置信度是 softmax 分数，不等同于已校准的识别准确率。
+
+官方模型示例：[NVIDIA SegFormer B0 Cityscapes 权重与配置](https://huggingface.co/nvidia/segformer-b0-finetuned-cityscapes-1024-1024/tree/main)。该示例不保证识别楼梯或坡道，也不是本包默认模型；自定义地形模型仍需提供对应权重和类别表。使用前核对所选模型卡和权重许可；导航代码的许可不替代模型许可。预处理接口见 [Transformers SegFormer 文档](https://huggingface.co/docs/transformers/model_doc/segformer)。
+
+需安装原几何链路依赖 RTAB-Map、SciPy、Shapely 2、OpenCV、message_filters；模型运行依赖由适配器决定。
 build.sh 会编译相机适配插件，start.sh 会加载包内 overlay。
 相机原检测输出固定使用原 live-domain guard 所要求的 outdoor observation 端点。
 关闭的传感器不参与依赖发现和健康门控；定位包不增加视觉里程计。
@@ -116,6 +150,7 @@ bash scripts/build.sh
 
 `params_file` 相对部署 manifest 所在目录解析。`policy` 保留原现场执行策略，确认项默认关闭，不能为让启动通过而随意设为 true。
 
+- `provider_ids.camera`：按相机包声明发现 RGB、深度、彩色 CameraInfo；配准深度 CameraInfo 仍通过 `topic_remap.camera_depth_info` 显式配置。关闭相机不发现这些输入。
 - `provider_ids.cloud`：提供 `robonix/primitive/lidar/lidar3d` 的前雷达。
 - `provider_ids.localization`：独立定位 service，同一实例提供 `robonix/service/localization/odom` 和 `.../status`；不将定位数据冒充底盘原语。`provider_ids.odom` 仍可单独指定 odom 角色。
 - `topic_remap`：显式话题绑定覆盖 Atlas；显式值覆盖 Atlas；未显式绑定的定位状态与 Odometry 来自所选 localization service。

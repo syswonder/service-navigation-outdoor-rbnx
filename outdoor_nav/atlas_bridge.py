@@ -27,6 +27,9 @@ CONTRACTS = {
     "cloud": "robonix/primitive/lidar/lidar3d",
     "odom": "robonix/service/localization/odom",
     "localization": "robonix/service/localization/status",
+    "camera_rgb": "robonix/primitive/camera/rgb",
+    "camera_depth": "robonix/primitive/camera/depth",
+    "camera_color_info": "robonix/primitive/camera/intrinsics",
 }
 
 
@@ -34,6 +37,8 @@ def resolve(config):
     config = {**config, "topic_remap": dict(config.get("topic_remap", {}))}
     for role, contract in CONTRACTS.items():
         if role == "cloud" and not config.get("policy", {}).get("lidar_enabled", True):
+            continue
+        if role.startswith("camera_") and not config.get("policy", {}).get("camera_enabled", False):
             continue
         if role in config["topic_remap"]:
             continue
@@ -43,12 +48,14 @@ def resolve(config):
             provider_id=config.get("provider_ids", {}).get(
                 role,
                 config.get("provider_ids", {}).get("localization", "")
-                if role == "odom"
-                else "",
+                if role == "odom" else config.get("provider_ids", {}).get("camera", "")
+                if role.startswith("camera_") else "",
             ),
         )
         if not found:
             return None, "Missing provider for " + role
+        if len(found) != 1:
+            return None, "Ambiguous provider for " + role + "; configure provider_ids"
         channel = service.connect_capability(
             found[0], contract_id=contract, transport="ros2"
         )

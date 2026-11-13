@@ -18,6 +18,7 @@
 服务示例 YAML 是可复制的完整结构；机器人实际调参应在部署副本中完成。
 不在服务启动代码中重建 costmap、补入控制器或覆盖 YAML 中的调参。
 `params_file` 和权重相对活动 manifest 所在目录解析，使用 `RBNX_INVOCATION_CWD`；
+权重路径可以是文件或目录，具体格式由适配器验证。可选 SegFormer 适配器要求含权重、`config.json` 和 `preprocessor_config.json` 的本地目录；配置示例及接口约定见 README。
 `run_dir` 显式为相对路径时也遵循这一规则。
 
 ## 话题绑定和生效参数
@@ -53,7 +54,7 @@ YAML 支持以下占位符，绑定到 `topic_remap` 显式值或 Atlas 解析�
 `camera_layer.max_age_s` 在 YAML 中配置；`policy.sensor_timeout_s` 是执行与命令守卫的
 反馈时效限制，两者各自生效。
 
-相机沿用原 RGB-D 检查、RTAB-Map、正负障碍检测和 PIDNet 辅助语义。
+相机沿用原 RGB-D 检查、RTAB-Map、正负障碍检测和 可替换模型辅助语义。
 新增稳定性过滤仍在原检测结果之后；本次参数调整不改检测算法。
 
 雷达为 3D 输入时使用 `scan_projection`；`enabled` 未指定则跟随雷达开关。

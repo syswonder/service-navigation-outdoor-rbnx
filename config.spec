@@ -18,7 +18,8 @@ properties:
       odom: {type: string, x-provider: robonix/service/localization/odom}
       localization: {type: string, x-provider: robonix/service/localization/status}
       chassis: {type: string, x-provider: robonix/primitive/chassis/gait_in}
-    description: Atlas provider instance ids. odom defaults to localization. Disabled lidar is not discovered. RGB-D topics are explicitly bound; chassis is needed only for guarded gait switching.
+      camera: {type: string, x-provider: robonix/primitive/camera/rgb}
+    description: Atlas provider instance ids. odom defaults to localization. Disabled sensors are not discovered. Registered depth CameraInfo is explicitly bound; chassis is needed only for guarded gait switching.
   topic_remap:
     type: object
     x-group: Inputs
@@ -50,6 +51,11 @@ properties:
       camera_semantics:
         type: string
         default: "/outdoor/vision/current_grid"
+      camera_labels: {type: string, default: /outdoor/vision/semantic_labels}
+      camera_confidence: {type: string, default: /outdoor/vision/semantic_confidence}
+      camera_road_mask: {type: string, default: /outdoor/vision/road_mask}
+      camera_segmentation_status: {type: string, default: /semantic/segmentation_status}
+      camera_overlay: {type: string, default: /semantic/debug_overlay}
       camera_costmap:
         type: string
         default: "/outdoor/vision/filtered_costmap"
@@ -93,14 +99,16 @@ properties:
     type: object
     x-group: Vision
     additionalProperties: false
-    description: Optional model-neutral road segmentation. Enabled backends require an existing weights file; see README download links and plugin contract.
+    description: Optional replaceable semantic segmentation. Enabled backends require a weights file or directory and class table; see README.
     properties:
       enabled: {type: boolean, default: false}
-      backend: {type: string, description: "pidnet or importable module:factory"}
-      weights: {type: string, description: "Required when enabled; downloaded weights file, relative to deploy manifest directory."}
+      backend: {type: string, default: "", description: "Importable module:factory. No default model selection; optional SegFormer adapter available."}
+      weights: {type: string, description: "Required when enabled; weights file or directory, relative to deploy manifest directory. Format validated by adapter."}
       device: {type: string, default: auto}
       confidence_threshold: {type: number, default: 0.7, minimum: 0, maximum: 1}
       options: {type: object, additionalProperties: true}
+      classes: {type: object, default: {}, additionalProperties: {type: string}, description: "Model IDs 0..65534 to semantic names; 65535 is reserved for unknown."}
+      road_classes: {type: array, default: [], uniqueItems: true, items: {type: string}, description: "Names from classes used for road soft costs. Does not override geometric obstacles."}
   policy:
     type: object
     x-group: Execution and observation

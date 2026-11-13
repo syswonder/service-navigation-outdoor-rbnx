@@ -19,22 +19,6 @@
     "source": "navigation_ws/src/semantic_local_grid/semantic_local_grid/obstacle_geometry.py",
     "sha256": "04b51572755dd9eb49c5f6a9b9ba595ae0f5873871b877dd5ede478e24979e82"
   },
-  "semantic_local_grid\\pidnet_node.py": {
-    "source": "navigation_ws/src/semantic_local_grid/semantic_local_grid/pidnet_node.py",
-    "sha256": "57b7eb2647fa9db24e5a8acdd2419a6dd7266f8ecb4aab4f3216741b1f71a321"
-  },
-  "semantic_local_grid\\pidnet_vendor\\model_utils.py": {
-    "source": "navigation_ws/src/semantic_local_grid/semantic_local_grid/pidnet_vendor/model_utils.py",
-    "sha256": "8817f6367b4c9d094b35cd606926f2937cef98469fff888e3773c1c95ca969aa"
-  },
-  "semantic_local_grid\\pidnet_vendor\\pidnet.py": {
-    "source": "navigation_ws/src/semantic_local_grid/semantic_local_grid/pidnet_vendor/pidnet.py",
-    "sha256": "1692ebc05ea4cc7096abd0b9a2e7e79543d878955af1a9d3d60e7973d6eb623d"
-  },
-  "semantic_local_grid\\pidnet_vendor\\__init__.py": {
-    "source": "navigation_ws/src/semantic_local_grid/semantic_local_grid/pidnet_vendor/__init__.py",
-    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-  },
   "semantic_local_grid\\geometry.py": {
     "source": "navigation_ws/src/semantic_local_grid/semantic_local_grid/geometry.py",
     "sha256": "1b9e4ccac84a97f619efab1116fbd2899150e7dbca40cc2e42cc871af7c0293d"
@@ -42,10 +26,6 @@
   "semantic_local_grid\\__init__.py": {
     "source": "navigation_ws/src/semantic_local_grid/semantic_local_grid/__init__.py",
     "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-  },
-  "semantic_local_grid\\inference.py": {
-    "source": "navigation_ws/src/semantic_local_grid/semantic_local_grid/inference.py",
-    "sha256": "5ba6f68e19eb92b0c7fd4ce3867882ac5d7ca5d4b7185ebbbe4c7d1b23bafb6f"
   },
   "semantic_local_grid\\fusion_node.py": {
     "source": "navigation_ws/src/semantic_local_grid/semantic_local_grid/fusion_node.py",
