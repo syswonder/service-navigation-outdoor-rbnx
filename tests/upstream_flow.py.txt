@@ -71,7 +71,7 @@ if args.rtk_imu:
     config['wit_imu']={**WIT_DEFAULTS,'udp_port':29867,
         'base_from_imu':[[1.,0.,0.,0.],[0.,1.,0.,0.],[0.,0.,1.,0.],[0.,0.,0.,1.]],
         'magnetic_declination_rad':0.,'yaw_std_deg':1.,'mounting_confirmed':True,
-        'reference_confirmed':True,'quality_confirmed':True}
+        'reference_confirmed':True}
 if args.field_policy:
     field=json.loads((ROOT/'deploy/lynx/robot.fieldtest.json').read_text())
     for key in (*DEFAULTS,'scan_range_min_m'):

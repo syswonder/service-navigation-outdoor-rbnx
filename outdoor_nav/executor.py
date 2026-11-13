@@ -121,10 +121,17 @@ class Executor(Node):
             raise ApiError(503, "Waiting for " + layer + " costmap")
         frame = message.header.frame_id
         robot, path = None, []
+        overlay_warnings = []
+        def transform_fresh(transform):
+            stamp = transform.header.stamp
+            age = self.get_clock().now().nanoseconds/1e9-stamp.sec-stamp.nanosec/1e9
+            return -.1 <= age < 3.
         try:
             transform = self.tf.lookup_transform(
                 frame, self.base_frame, rclpy.time.Time()
             )
+            if not transform_fresh(transform):
+                raise ValueError('Robot transform is stale')
             t, q = transform.transform.translation, transform.transform.rotation
             robot = {
                 "x": t.x,
@@ -138,7 +145,7 @@ class Executor(Node):
                 ),
             }
         except Exception:
-            pass  # No TF is displayed as unavailable, never as a fabricated pose.
+            overlay_warnings.append('robot_transform_unavailable')
         try:
             task = self.tasks.snapshot() or {}
             points = task.get("execution_path") or []
@@ -146,6 +153,8 @@ class Executor(Node):
                 path = points
             elif points:
                 transform = self.tf.lookup_transform(frame, "map", rclpy.time.Time())
+                if not transform_fresh(transform):
+                    raise ValueError('Path transform is stale')
                 t, angle = (
                     transform.transform.translation,
                     yaw(transform.transform.rotation),
@@ -159,7 +168,8 @@ class Executor(Node):
                     for p in points
                 ]
         except Exception:
-            pass
+            path = []
+            overlay_warnings.append('path_transform_unavailable')
         # Encode once per grid message, not once per viewer poll. No disk writes.
         map_from_frame = (
             {"x": 0.0, "y": 0.0, "yaw": 0.0, "age_s": 0.0} if frame == "map" else None
@@ -195,6 +205,7 @@ class Executor(Node):
             "robot": robot,
             "path": path,
             "map_from_frame": map_from_frame,
+            "overlay_warnings": overlay_warnings,
         }
 
     def on_odom(self, msg):
