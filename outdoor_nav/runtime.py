@@ -216,13 +216,20 @@ class OutdoorExecutor(Executor):
                         and received_age < 1. and body.get("state") == 17
                         and body.get("usage_mode") == 1 and 0 <= mode_age < 3.
                         and 0 <= motion_age < 1. and body.get("gait_output_enabled") is True)
+            # The stairs gait does not honour pure rotation, so rotations on a
+            # stairs section temporarily switch the gait to flat (see
+            # GaitSchedule.tick); detect them from the fresh controller output.
+            raw = self.raw_command
+            rotating = (0 <= now - self.raw_received < self.config.get("command_timeout_s", 0.5)
+                        and abs(raw.linear.x) < 0.02 and abs(raw.angular.z) > 0.02)
             command, status = self.gait_schedule.tick(
                 position, now, body.get("gait"), max(motion_age, received_age), eligible,
                 stopped=(self.stationary_since is not None
                          and now-self.stationary_since >= self.config["stop_hold_s"]
                          and now-self.velocity_at < self.config.get("localization_timeout_s", 3.0)),
                 timeout_s=self.config["gait_switch_timeout_s"],
-                prepare_timeout_s=self.config.get("gait_prepare_timeout_s", 15.))
+                prepare_timeout_s=self.config.get("gait_prepare_timeout_s", 15.),
+                rotating=rotating)
             if command is not None:
                 self.gait_pub.publish(UInt32(data=command))
             self.tasks.update(task["task_id"], gait_status=status)

@@ -92,6 +92,11 @@ class GaitSchedule:
         self.switch_started = None
         self.prepare_started = None
         self.failed = False
+        # The robot ignores pure-rotation commands in the stairs gait, so a
+        # rotation on a stairs section temporarily overrides the target to the
+        # flat gait: switch to flat, rotate, then switch back to stairs.
+        self.rotation_hold = False
+        self.rotation_since = None
 
     def desired(self, station):
         if any(a <= station < b or (station == b == self.route.offsets[-1])
@@ -102,9 +107,18 @@ class GaitSchedule:
                 return FLAT if item["gait"] == "flat" else None
         return None
 
-    def tick(self, position, now, actual, feedback_age_s, eligible, stopped=False, timeout_s=5., prepare_timeout_s=15.):
+    def tick(self, position, now, actual, feedback_age_s, eligible, stopped=False, timeout_s=5., prepare_timeout_s=15., rotating=False):
         station = self.route.update(position)
-        target = self.desired(station)
+        desired = self.desired(station)
+        if rotating and desired == STAIRS:
+            if not self.rotation_hold:
+                self.rotation_hold = True
+            self.rotation_since = now
+        elif self.rotation_hold and (not rotating and self.rotation_since is not None
+                                     and now - self.rotation_since >= 1.0):
+            self.rotation_hold = False
+            self.rotation_since = None
+        target = FLAT if self.rotation_hold and desired == STAIRS else desired
         if target != self.target:
             self.target, self.last_sent, self.attempts = target, -math.inf, 0
             self.switch_started = self.prepare_started = None
@@ -139,4 +153,5 @@ class GaitSchedule:
             "route_progress_m": station, "reason": reason,
             "failed": self.failed, "motion_allowed": confirmed and not self.failed,
             "local_avoidance_enabled": target != STAIRS,
+            "rotation_hold": self.rotation_hold,
         }

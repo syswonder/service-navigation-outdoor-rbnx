@@ -16,8 +16,30 @@ INTERVALS = [
 ORIGIN = {"latitude":30., "longitude":120.}
 
 
-def tick(schedule, station, now=0., actual=FLAT, age=0., eligible=True, stopped=True):
-    return schedule.tick({"x":station, "y":0.}, now, actual, age, eligible, stopped=stopped)
+def tick(schedule, station, now=0., actual=FLAT, age=0., eligible=True, stopped=True, rotating=False):
+    return schedule.tick({"x":station, "y":0.}, now, actual, age, eligible, stopped=stopped, rotating=rotating)
+
+
+def test_rotation_on_stairs_temporarily_switches_to_flat_gait():
+    schedule = GaitSchedule(REFERENCE, INTERVALS)
+    # Enter the stairs section and confirm the stairs gait.
+    assert tick(schedule, 4., 0.)[0] == STAIRS
+    state = tick(schedule, 4., 2., STAIRS)[1]
+    assert state["confirmed"] and state["motion_allowed"]
+    # A pure-rotation command overrides the target to flat and asks for it.
+    command, state = tick(schedule, 6., 3., STAIRS, rotating=True)
+    assert command == FLAT and state["target_code"] == FLAT and state["rotation_hold"]
+    assert not state["motion_allowed"]
+    # Once the flat gait is confirmed the rotation is allowed to run.
+    state = tick(schedule, 6., 5., FLAT, rotating=True)[1]
+    assert state["confirmed"] and state["motion_allowed"] and state["rotation_hold"]
+    # The hold persists through brief rotation gaps...
+    assert tick(schedule, 6., 5.5, FLAT)[1]["rotation_hold"]
+    # ...and releases after one second without rotation, switching back.
+    command, state = tick(schedule, 6., 6.6, FLAT)
+    assert command == STAIRS and not state["rotation_hold"]
+    state = tick(schedule, 6., 8., STAIRS)[1]
+    assert state["confirmed"] and state["motion_allowed"]
 
 
 def test_one_meter_before_and_after_boundaries():
