@@ -34,6 +34,8 @@ def serve(backend, port=8765, host="127.0.0.1"):
                     match = re.fullmatch(r"/api/costmaps/(local|global)", path)
                     if match and hasattr(backend, "costmap_snapshot"):
                         return self.respond(200, backend.costmap_snapshot(match[1]))
+                    if path == "/api/clouds" and hasattr(backend, "cloud_snapshot"):
+                        return self.respond(200, backend.cloud_snapshot())
                     if path == "/api/status":
                         return self.respond(200, backend.status())
                     match = re.fullmatch(r"/api/tasks/([a-f0-9]{32})", path)

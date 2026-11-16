@@ -1,6 +1,7 @@
 """ROS execution worker. Sensors/localization are external providers."""
 
 import argparse
+import base64
 import json
 import math
 from pathlib import Path
@@ -22,7 +23,7 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.qos import QoSProfile, qos_profile_sensor_data
 from rclpy.parameter import Parameter
 from rclpy.signals import SignalHandlerOptions
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import LaserScan, PointCloud2
 from std_msgs.msg import String, UInt32
 from tf2_ros import Buffer, TransformListener
 
@@ -65,6 +66,7 @@ class OutdoorExecutor(Executor):
         self.global_map = self.local_map = None
         self.costmap_view_cache = {}
         self.raw_command, self.raw_received = Twist(), 0.0
+        self.cloud_preview, self.cloud_preview_at = None, -math.inf
         self.velocity, self.velocity_at = (math.inf, math.inf), 0.0
         self.owner, self.stopping = None, True
         self.stop_failure = None
@@ -125,6 +127,8 @@ class OutdoorExecutor(Executor):
             (String, "/outdoor/command_status", self.on_guard, 10),
             (String, "/outdoor/chassis_status", self.on_chassis, 10),
             (LaserScan, "/outdoor/scan", self.on_scan, qos_profile_sensor_data),
+            (PointCloud2, "/outdoor/cloud_for_scan", self.on_cloud_preview,
+             qos_profile_sensor_data),
         ):
             self.create_subscription(kind, name, callback, qos)
         self.server = ActionServer(
@@ -190,6 +194,38 @@ class OutdoorExecutor(Executor):
                 self.startup_stopped = True
         finally:
             self.stop_recovering = False
+
+    def on_cloud_preview(self, msg):
+        """Cache a downsampled lidar cloud for the read-only 3D page view."""
+        from .core.cloud_view import parse_xyz, voxel_downsample
+
+        try:
+            xyz = parse_xyz(msg)
+        except ValueError:
+            return
+        points = voxel_downsample(xyz, 0.06, 6000)
+        stamp = msg.header.stamp
+        payload = {
+            "ok": True,
+            "frame_id": msg.header.frame_id or "base_link",
+            "count": int(len(points)),
+            "stamp_s": float(stamp.sec) + float(stamp.nanosec) * 1e-9,
+            "points_b64": base64.b64encode(
+                points.astype("<f4").tobytes()).decode(),
+        }
+        with self.state_lock:
+            self.cloud_preview, self.cloud_preview_at = payload, time.monotonic()
+
+    def cloud_snapshot(self):
+        from .http import ApiError
+
+        with self.state_lock:
+            payload, age = self.cloud_preview, time.monotonic() - self.cloud_preview_at
+        if payload is None:
+            raise ApiError(503, "Waiting for the lidar cloud")
+        if age > 3.0:
+            raise ApiError(503, "Lidar cloud is stale")
+        return payload
 
     def gait_tick(self):
         with self.state_lock:

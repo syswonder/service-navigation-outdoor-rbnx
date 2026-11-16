@@ -128,6 +128,21 @@ class SceneNavigation:
         except (URLError, TimeoutError, OSError, ValueError) as error:
             raise ApiError(503, 'Navigation costmap unavailable: '+str(error)) from error
 
+    def clouds(self):
+        if not self.navigation_http_url:
+            raise ApiError(503, 'Navigation cloud endpoint is not configured')
+        try:
+            with urlopen(self.navigation_http_url + '/api/clouds', timeout=2.) as response:
+                return json.load(response)
+        except HTTPError as error:
+            try:
+                detail = json.load(error).get('error', str(error))
+            except (ValueError, AttributeError):
+                detail = str(error)
+            raise ApiError(503, detail) from error
+        except (URLError, TimeoutError, OSError, ValueError) as error:
+            raise ApiError(503, 'Navigation cloud unavailable: ' + str(error)) from error
+
     def bind_map(self, snapshot):
         with self.lock:
             if self.execution_enabled:
