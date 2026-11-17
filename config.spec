@@ -14,6 +14,7 @@ properties:
     x-group: Inputs
     additionalProperties: false
     properties:
+      imu: {type: string, x-provider: robonix/primitive/imu/imu}
       cloud: {type: string, x-provider: robonix/primitive/lidar/lidar3d}
       odom: {type: string, x-provider: robonix/service/localization/odom}
       localization: {type: string, x-provider: robonix/service/localization/status}
@@ -26,6 +27,11 @@ properties:
     additionalProperties: false
     description: Absolute ROS topics. Explicit values take priority over Atlas for cloud/odom/localization. Other roles bind wrapper endpoints; Nav2 consumes the matching topic tokens.
     properties:
+      imu: {type: string, default: /wit_10axis/data}
+      visual_terrain: {type: string, default: /outdoor/vision/terrain}
+      lidar_terrain: {type: string, default: /outdoor/lidar/terrain}
+      terrain_state: {type: string, default: /outdoor/terrain_state}
+      filtered_cloud: {type: string, default: /outdoor/cloud_for_scan}
       camera_rgb:
         type: string
         default: "/camera_gemini330/color/image_raw"
@@ -122,7 +128,17 @@ properties:
       camera_enabled:
         type: boolean
         default: false
-        description: "Use the original RGB-D/RTAB-Map chain followed by stability filtering and its own costmap layer."
+        description: "Enable the camera costmap and its health gate. Requires geometry or semantic segmentation."
+      camera_geometry_enabled:
+        type: boolean
+        default: true
+        description: "Enable original RGB-D obstacle detection and stability filtering. Semantic projection can run independently."
+      camera_max_range_m: {type: number, default: 4.0, minimum: 0.5, maximum: 10.0, description: Forward base-frame horizontal range for all visual perception in metres.}
+      camera_blind_zone_m:
+        type: number
+        minimum: 0
+        default: 0.0
+        description: "Radius in metres of the forward blind zone from base_link. Only unknown camera cells in the half-disc are marked free. Zero disables the region."
       camera_frame_confirmed:
         type: boolean
         default: false
@@ -349,3 +365,152 @@ properties:
     type: string
     x-group: Startup
     description: Optional ROS-compatible worker interpreter. Defaults to the bridge interpreter.
+  terrain:
+    type: object
+    additionalProperties: false
+    description: Optional terrain FSM and shared slope envelope; see docs/TERRAIN.md.
+      Existing deployments retain the old path unless enabled.
+    properties:
+      enabled:
+        type: boolean
+        default: false
+      slope_filter_enabled:
+        type: boolean
+        default: false
+      lidar_slope_enabled:
+        type: boolean
+        default: true
+      camera_slope_enabled:
+        type: boolean
+        default: true
+      slope_angle_deg:
+        type: number
+        default: 15.0
+      ground_z_m:
+        type: number
+        default: -0.18
+      height_margin_m:
+        type: number
+        default: 0.1
+      max_obstacle_height_m:
+        type: number
+        default: 2.5
+      can_climb_stairs:
+        type: boolean
+        default: false
+      stairs_classes:
+        type: array
+        items:
+          type: string
+        default: []
+      lidar_semantics_enabled:
+        type: boolean
+        default: false
+        description: 'TODO: not implemented; must remain false. No subscription is created.'
+      pitch_flat_deg:
+        type: number
+        default: 4.0
+      pitch_hold_deg:
+        type: number
+        default: 8.0
+      pitch_sign:
+        type: number
+        default: 1.0
+      pitch_offset_deg:
+        type: number
+        default: 0.0
+      confirm_s:
+        type: number
+        default: 0.5
+      clear_s:
+        type: number
+        default: 0.8
+      observation_timeout_s:
+        type: number
+        default: 1.0
+      roi_half_width_m:
+        type: number
+        default: 0.8
+      min_stair_points:
+        type: integer
+        default: 20
+      min_stair_rise_m:
+        type: number
+        default: 0.08
+      front_band_m:
+        type: number
+        default: 0.2
+      min_front_width_m:
+        type: number
+        default: 0.35
+      max_front_residual_m:
+        type: number
+        default: 0.08
+      alignment_tolerance_deg:
+        type: number
+        default: 6.0
+      alignment_speed_rps:
+        type: number
+        default: 0.15
+      alignment_kp:
+        type: number
+        default: 0.8
+      alignment_timeout_s:
+        type: number
+        default: 20.0
+      stairs_speed_mps:
+        type: number
+        default: 0.15
+      semantic_match_radius_m:
+        type: number
+        default: 0.12
+      flat_gait_code:
+        type:
+        - integer
+        - 'null'
+        default: null
+        minimum: 0
+        maximum: 4294967295
+      upstairs_gait_code:
+        type:
+        - integer
+        - 'null'
+        default: null
+        minimum: 0
+        maximum: 4294967295
+      priorities:
+        type: object
+        additionalProperties: false
+        properties:
+          flat: &id001
+            type: object
+            additionalProperties: false
+            properties:
+              lidar_obstacles:
+                type: integer
+                minimum: 0
+                maximum: 1000
+              lidar_semantics:
+                type: integer
+                minimum: 0
+                maximum: 1000
+              visual_obstacles:
+                type: integer
+                minimum: 0
+                maximum: 1000
+              visual_semantics:
+                type: integer
+                minimum: 0
+                maximum: 1000
+          stairs_up: *id001
+        default:
+          flat:
+            lidar_obstacles: 100
+            visual_obstacles: 90
+            lidar_semantics: 50
+            visual_semantics: 40
+          stairs_up:
+            visual_semantics: 100
+            lidar_semantics: 90
+            lidar_obstacles: 60
+            visual_obstacles: 50

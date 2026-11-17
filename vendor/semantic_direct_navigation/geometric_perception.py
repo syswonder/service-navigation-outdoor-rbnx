@@ -109,7 +109,7 @@ def current_body_region(pose, safety_radius):
 
 
 def _independent_observation(points, *, expected_ground_z=-.18, ground_z_tolerance=.05,
-                          min_height=.10, max_height=1.5, min_ground=40):
+                          min_height=.10, max_height=1.5, min_ground=40, max_ground_angle_deg=12.):
     points = np.asarray(points, float).reshape(-1, 3)
     points = points[np.isfinite(points).all(axis=1)]
     # Zero ranges must not be transformed into apparent ground or obstacles.
@@ -141,7 +141,7 @@ def _independent_observation(points, *, expected_ground_z=-.18, ground_z_toleran
             model = np.linalg.solve(a[ids], fit[ids, 2])
         except np.linalg.LinAlgError:
             continue
-        if (np.linalg.norm(model[:2]) > np.tan(np.deg2rad(12.))
+        if (np.linalg.norm(model[:2]) > np.tan(np.deg2rad(max_ground_angle_deg))
                 or abs(model[2]-expected_ground_z) > ground_z_tolerance):
             continue
         keep = abs(a@model-fit[:, 2]) < .018
@@ -155,7 +155,7 @@ def _independent_observation(points, *, expected_ground_z=-.18, ground_z_toleran
         return empty, empty, dict(status, reason='GEOMETRIC_GROUND_TOO_NARROW')
     model = np.linalg.lstsq(a[best[1]], support[:, 2], rcond=None)[0]
     if (abs(model[2]-expected_ground_z) > ground_z_tolerance
-            or np.linalg.norm(model[:2]) > np.tan(np.deg2rad(12.))):
+            or np.linalg.norm(model[:2]) > np.tan(np.deg2rad(max_ground_angle_deg))):
         return empty, empty, dict(status, reason='GEOMETRIC_GROUND_CALIBRATION_MISMATCH')
     residual = points[:, 2] - np.column_stack((points[:, :2], np.ones(len(points))))@model
     error = support[:, 2] - a[best[1]]@model
@@ -174,14 +174,14 @@ def _independent_observation(points, *, expected_ground_z=-.18, ground_z_toleran
 
 def geometric_observation(points, *, expected_ground_z=-.18, ground_z_tolerance=.05,
                           min_height=.10, max_height=1.5, min_ground=40,
-                          prior_plane=None):
+                          prior_plane=None, max_ground_angle_deg=12.):
     """Fit own ground first; an explicitly validated geometric prior may back up
     a scan without ground returns. Caller must enforce prior freshness/frame.
     A prior supplies height, never free-space or an absent obstacle return.
     """
     ground, obstacles, status = _independent_observation(points,
         expected_ground_z=expected_ground_z, ground_z_tolerance=ground_z_tolerance,
-        min_height=min_height, max_height=max_height, min_ground=min_ground)
+        min_height=min_height, max_height=max_height, min_ground=min_ground, max_ground_angle_deg=max_ground_angle_deg)
     if status['valid']:
         status['plane_source'] = 'CURRENT_SCAN_GEOMETRY'
         return ground, obstacles, status
@@ -190,7 +190,7 @@ def geometric_observation(points, *, expected_ground_z=-.18, ground_z_tolerance=
     model = np.asarray(prior_plane, float)
     if (model.shape != (3,) or not np.isfinite(model).all()
             or abs(model[2]-expected_ground_z) > ground_z_tolerance
-            or np.linalg.norm(model[:2]) > np.tan(np.deg2rad(12.))):
+            or np.linalg.norm(model[:2]) > np.tan(np.deg2rad(max_ground_angle_deg))):
         return ground, obstacles, dict(status, reason='INVALID_GEOMETRIC_PRIOR')
     raw = np.asarray(points, float).reshape(-1, 3)
     raw = raw[np.isfinite(raw).all(axis=1) & (np.linalg.norm(raw, axis=1) > .05)]

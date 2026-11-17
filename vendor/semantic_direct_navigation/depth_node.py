@@ -40,6 +40,8 @@ class DepthObstacles(Node):
                         alignment_verified=False,
                         allow_unverified_offline=False,
                         min_height=.10,
+                        max_range=4.0,
+                        max_ground_angle_deg=12.0,
                         max_age=1.0,
                         pixel_stride=3,
                         navigation_pose_topic='',
@@ -200,15 +202,17 @@ class DepthObstacles(Node):
             d = self.decoder.imgmsg_to_cv2(depth, 'passthrough')
             m = (np.ones(d.shape, np.uint8) if mask is None else self.decoder.imgmsg_to_cv2(mask, 'passthrough'))
             optical, labels = observations(d, m, info.k, .001 if depth.encoding == '16UC1' else 1.,
-                                           .2, 6., self.p['pixel_stride'])
+                                           .2, self.p['max_range']+1., self.p['pixel_stride'])
             base = transform(
                 optical, self.matrix(self.p['base_frame'], depth.header.frame_id,
                                      depth.header.stamp))
+            in_range = (base[:,0] > 0) & (np.linalg.norm(base[:,:2], axis=1) <= self.p['max_range'])
+            base, labels = base[in_range], labels[in_range]
             if self.p['geometry_primary']:
                 ground, obstacles, result = geometric_observation(
                     base, expected_ground_z=self.p['geometry_expected_ground_z'],
                     ground_z_tolerance=self.p['geometry_ground_z_tolerance'],
-                    min_height=self.p['min_height'])
+                    min_height=self.p['min_height'], max_ground_angle_deg=self.p['max_ground_angle_deg'])
             else:
                 obstacles, result = detect_low_obstacles(
                     base, labels, min_height=self.p['min_height'],

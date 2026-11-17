@@ -29,6 +29,10 @@
 未知相机单元不修改雷达，旧相机标记在本帧/超时后退休。最后由 Nav2 统一执行规划控制。
 
 `policy.lidar_enabled` / `camera_enabled` 选择雷达、相机或两者。相机几何检测与可选语义分割独立，默认 `semantic_segmentation.enabled: false`，无需语义模型权重或 PyTorch。
+
+`policy.camera_geometry_enabled` 默认 `true`。相机启用时至少开启几何检测或 `semantic_segmentation.enabled` 之一。只开语义时，根据实时配准深度投影，`road_classes` 对应地面记为自由，其他已分类地面附加软代价 40，未知保持未知。此模式不提供几何障碍或落差检测，只有有效、含已分类地面的投影才能更新相机健康状态。
+
+`policy.camera_blind_zone_m` 指以 `base_link` 为原点、沿车头方向的半圆半径，单位米。默认 `0.0`，不额外声明盲区。设置为正数后，只把这个半圆中的未知相机格标为可通行，保留几何障碍、已知软代价和独立雷达层。相机链路无有效数据时，不会单靠盲区生成健康信号。
 启用语义分割必须先下载对应模型权重，再设置 `semantic_segmentation.weights`；仓库不附带权重，不自动下载。缺失权重在初始化时报错并提示本文。相对路径以部署 manifest 所在目录为基准。
 
 ```yaml
@@ -86,9 +90,11 @@ semantic_segmentation:
 
 设置 `backend: outdoor_nav.segformer_backend:create_backend`，并在导航 worker 的 Python 环境中安装本包的 `[segformer]` 可选依赖（例如 `python -m pip install '.[segformer]'`）。Jetson 应安装适配其 JetPack 的 PyTorch，再安装匹配的 Transformers；不启用此适配器时无需安装这些依赖。
 
-此适配器要求 `weights` 为本地 Hugging Face `save_pretrained` 目录，包含模型权重（如 `model.safetensors`）、`config.json` 和 `preprocessor_config.json`。模型与图像处理器均须保存；仅有单独 `.pth` 文件不能直接使用此适配器。加载使用 `local_files_only=True`，缺失文件会报错，不在线补下载。
+此适配器要求 `weights` 为本地 Hugging Face 模型目录，包含模型权重（如 `model.safetensors`）和 `config.json`。加载使用 `local_files_only=True`。
 
-图像缩放、重采样、归一化等设置读取 `preprocessor_config.json`，不得用固定 ImageNet 参数替代训练时配置。当前适配器要求预处理保留完整视野，拒绝 crop/pad 配置；推理 logits 恢复原图尺寸后计算 softmax，返回原始类别编号和对应最大概率。`do_reduce_labels` 用于训练标签处理，不对预测类别再次减一。`options` 当前须为 `{}`。
+有 `preprocessor_config.json` 时，`options: {}` 会使用该文件。如果原模型只包含权重和模型配置，可以在 `options.preprocessing` 中填写训练时的参数。该选项一旦设置，就完整使用这组参数。必须显式填写布尔值 `do_resize`、`do_rescale` 和 `do_normalize`。启用 resize 时填写 `size: {height: ..., width: ...}` 和 Pillow 的 `resample` 编号，启用 rescale 时填写 `rescale_factor`，启用 normalize 时填写 RGB 顺序的 `image_mean` 和 `image_std`。
+
+当前适配器要求预处理保留完整视野，裁剪或补边需要另外实现像素坐标恢复。推理 logits 恢复原图尺寸后计算 softmax，返回原始类别编号和对应最大概率。`do_reduce_labels` 用于训练标签处理，不对预测类别再次减一。
 
 根据所选权重的实际类别表填写 `classes` 和 `road_classes`，不要复制其他权重的编号。适配器不做二值化、不提供 `last_stairs`，所有类别走同一个输出接口。置信度是 softmax 分数，不等同于已校准的识别准确率。
 
@@ -218,3 +224,18 @@ Scene 使用本包的 `outdoor_nav.scene.SceneNavigation`，只接收当前建�
 ## 本地验证材料
 
 测试脚本和验证报告集中保存在 `local_only/`，运行方法见该目录的 `README.md`。该目录不提交 Git，新克隆仓库不包含这些材料。部署用配置示例保留在 `config/`；机器专用配置可放在 `local_only/config/`，并在部署中显式引用对应路径。
+
+## base_link 路线适配（本地修改）
+
+新录制配置 mapping `reference_point: base_link`、`localization_provider_id: localization_outdoor`，并提供与定位相同的 `origin_wgs84`。先启动定位，再启动建图。初始采集阶段定位 `require_map_reference: false`，不绑定旧地图 ID；实测标定和定位就绪条件仍必须满足。加载地图后仍须通过 Robonix/Scene 将地图 ID、版本和原点绑定给定位。
+
+mapping 消费已有 localization/status ROS 2 能力中的 pose 与 coordinate_reference，不重复补偿杆臂；原始 GNSS 消息继续保存。状态新增 pose_age_s、pose_stamp_s、status_stamp_s。pose_stamp_s 是定位进程单调时钟下的样本标识，仅用于顺序和去重；status_stamp_s 为 ROS 时钟，用于传输时效检查。需要同时更新定位和建图代码；旧定位缺少这些字段时不接受 base_link 录制。
+
+失效定位或原点不匹配时轨迹断段，重复样本不累计。录制、地图和规划结果持久化 reference_point，版本摘要包含该字段。旧数据缺少字段时按 gnss_antenna 解释，不能与 base_link 数据混录、合并或补采。恢复使用录制自身的原点与参考点。旧图精确转换需要历史同步姿态和实际杆臂，否则应重新录制。
+
+Navigation 和 Scene 仅对显式 base_link 路线解除零杆臂要求，仍检查原点、地图身份、零地图平移及实时 base_link 参考。不同机器人的杆臂无需相等。旧天线路线保持原有零杆臂兼容规则。
+
+本轮扩展已有 JSON 字段，不新增能力约定或改变 ROS 消息类型。仍是二维杆臂模型，尚未实现三维坡道补偿。本轮仅本地测试，未同步 ranger，未验证 ROS 整栈或真实底盘。
+
+
+地形状态机、四路优先级、共享坡度阈值与新参数见 [地形导航说明](docs/TERRAIN.md)。新状态机和高度阈值需显式开启；视觉前向距离默认 4 m，保留原有传感器独立开关。

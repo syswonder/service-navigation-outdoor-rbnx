@@ -45,6 +45,8 @@ def nodes(context):
     ]
     rosargs = ["--ros-args"] + [arg for a, b in remaps for arg in ("-r", a + ":=" + b)]
     projection = runtime["scan_projection"]
+    terrain = runtime.get("terrain", {})
+    filter_cloud = terrain.get("enabled", False) or (terrain.get("slope_filter_enabled", False) and terrain.get("lidar_slope_enabled", True))
     camera_children, camera_optional = vision_nodes(runtime, worker_python, rosargs) if robot["camera_enabled"] else ([], [])
     children = [
         ExecuteProcess(
@@ -69,16 +71,20 @@ def nodes(context):
             ],
             output="screen",
         ),
+        *([ExecuteProcess(cmd=[worker_python, "-m", "outdoor_nav.cloud_height_filter", runtime_file, *rosargs], output="screen")]
+          if robot["lidar_enabled"] and filter_cloud else []),
+        *([ExecuteProcess(cmd=[worker_python, "-m", "outdoor_nav.terrain_perception", runtime_file, *rosargs], output="screen")]
+          if terrain.get("enabled") and robot["camera_enabled"] and runtime["semantic_segmentation"]["enabled"] and terrain.get("stairs_classes") else []),
         *([Node(
             package="pointcloud_to_laserscan",
             executable="pointcloud_to_laserscan_node",
-            remappings=[("cloud_in", policy["cloud"]), ("scan", policy["scan"])],
+            remappings=[("cloud_in", policy["filtered_cloud"] if filter_cloud else policy["cloud"]), ("scan", policy["scan"])],
             parameters=[
                 {
                     "target_frame": projection["target_frame"],
                     "transform_tolerance": projection["transform_tolerance_s"],
-                    "min_height": projection["min_height_m"],
-                    "max_height": projection["max_height_m"],
+                    "min_height": -100.0 if filter_cloud else projection["min_height_m"],
+                    "max_height": 100.0 if filter_cloud else projection["max_height_m"],
                     "range_min": projection["range_min_m"],
                     "range_max": projection["range_max_m"],
                     "use_inf": True,

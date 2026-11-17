@@ -15,7 +15,7 @@ def submit(node, payload):
         "request_id",
         "arrival_tolerance_m",
         "localization_grade",
-        "map_id", "version", "origin_wgs84", "intervals",
+        "map_id", "version", "origin_wgs84", "intervals", "reference_point",
     }:
         raise ValueError("Unknown reference execution fields")
     if payload.get("frame_id") != "map":
@@ -39,6 +39,7 @@ def submit(node, payload):
     request_id = payload.get("request_id")
     if not isinstance(request_id, str) or not re.fullmatch("[a-f0-9]{32}", request_id):
         raise ValueError("request_id needs 32 lowercase hex characters")
+    live_terrain = getattr(node, "runtime", {}).get("terrain", {}).get("enabled", False)
     metadata = {"map_id": None, "map_version": None, "origin_wgs84": None, "intervals": []}
     if any(k in payload for k in ("map_id", "version", "origin_wgs84", "intervals")):
         map_id, version, origin = (payload.get(k) for k in ("map_id", "version", "origin_wgs84"))
@@ -52,7 +53,13 @@ def submit(node, payload):
                 or not -90 <= origin["latitude"] <= 90 or not -180 <= origin["longitude"] <= 180):
             raise ValueError("Invalid map origin")
         metadata = {"map_id": map_id, "map_version": version, "origin_wgs84": dict(origin),
-                    "intervals": validate_intervals(reference, payload.get("intervals", []))}
+                    "intervals": validate_intervals(reference, payload.get("intervals", []), check_codes=not live_terrain)}
+    if 'reference_point' in payload and metadata['map_id'] is None:
+        raise ValueError('reference_point requires map metadata')
+    reference_point = payload.get('reference_point', 'gnss_antenna')
+    if reference_point not in ('base_link', 'gnss_antenna'):
+        raise ValueError('Unknown route reference_point')
+    metadata['reference_point'] = reference_point
     grade = payload.get("localization_grade")
     if grade is not None and grade not in ("fixed", "float"):
         raise ValueError("Unknown localization grade")
@@ -94,12 +101,13 @@ def submit(node, payload):
             if (ref.get("frame_id") != "map" or ref.get("axes") != "east_north"
                     or ref.get("origin_wgs84") != metadata["origin_wgs84"]
                     or ref.get("map_offset_xy_m") != [0., 0.]
-                    or ref.get("antenna_xy_m") != [0., 0.]):
+                    or (reference_point == 'base_link' and ref.get('reference_point') != 'base_link')
+                    or (reference_point != 'base_link' and ref.get("antenna_xy_m") != [0., 0.])):
                 raise ApiError(409, "Route and live localization coordinate references differ")
             if ref.get("map_id") is not None and (ref.get("map_id") != metadata["map_id"]
                                                   or ref.get("version") != metadata["map_version"]):
                 raise ApiError(409, "Route and localization map identities differ")
-        if metadata["intervals"]:
+        if metadata["intervals"] and not live_terrain:
             if any(i["gait"] == "unknown" for i in metadata["intervals"]):
                 raise ApiError(409, "Unknown route gait; inspect the recording before execution")
             if not getattr(node, "runtime", {}).get("gait_switching_enabled", False):

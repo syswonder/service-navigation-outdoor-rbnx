@@ -11,6 +11,9 @@ from .nav2_parameters import prepare, projection_config
 DEFAULTS = {
     "lidar_enabled": True,
     "camera_enabled": False,
+    "camera_geometry_enabled": True,
+    "camera_blind_zone_m": 0.0,
+    "camera_max_range_m": 4.0,
     "camera_frame_confirmed": False,
     "camera_expected_ground_z_m": -0.18,
     "camera_ground_tolerance_m": 0.05,
@@ -57,6 +60,11 @@ DEFAULTS = {
     "heading_source": "wit_imu",
 }
 TOPICS = {
+    "imu": "/wit_10axis/data",
+    "visual_terrain": "/outdoor/vision/terrain",
+    "lidar_terrain": "/outdoor/lidar/terrain",
+    "terrain_state": "/outdoor/terrain_state",
+    "filtered_cloud": "/outdoor/cloud_for_scan",
     "camera_rgb": "/camera_gemini330/color/image_raw",
     "camera_depth": "/camera_gemini330/depth/image_raw",
     "camera_depth_info": "/camera_gemini330/depth/camera_info",
@@ -93,7 +101,7 @@ def topic(value):
 def validate(config, base=None):
     if not isinstance(config, dict):
         raise ValueError("Service config must be an object")
-    allowed = {"params_file", "provider_ids", "topic_remap", "semantic_segmentation",
+    allowed = {"terrain", "params_file", "provider_ids", "topic_remap", "semantic_segmentation",
                "policy", "scan_projection", "velocity_output_topic", "gait_switching_enabled",
                "gait_output_topic", "global_grid", "run_dir", "http_port", "action_wait_s", "worker_python"}
     if set(config) - allowed:
@@ -102,7 +110,7 @@ def validate(config, base=None):
         if not isinstance(config.get(field, {}), dict):
             raise ValueError(field + " must be a mapping")
     providers = config.get("provider_ids", {})
-    if set(providers) - {"cloud", "odom", "localization", "chassis", "camera"} or any(not isinstance(v, str) for v in providers.values()):
+    if set(providers) - {"cloud", "odom", "localization", "chassis", "camera", "imu"} or any(not isinstance(v, str) for v in providers.values()):
         raise ValueError("Unknown provider role or non-string provider id")
     if type(config.get("http_port", 19975)) is not int or not 1024 <= config.get("http_port", 19975) <= 65535:
         raise ValueError("http_port must be an integer in [1024, 65535]")
@@ -172,6 +180,10 @@ def validate(config, base=None):
         raise ValueError("Enable at least one obstacle sensor")
     from .segmentation import validate_segmentation
     segmentation = validate_segmentation(config.get("semantic_segmentation", {}), base, policy["camera_enabled"])
+    if policy["camera_enabled"] and not (policy["camera_geometry_enabled"] or segmentation["enabled"]):
+        raise ValueError("Camera mode requires geometry detection or semantic segmentation")
+    if not 0 <= policy["camera_blind_zone_m"] <= policy["camera_max_range_m"]:
+        raise ValueError("camera_blind_zone_m must be nonnegative and within camera_max_range_m")
     if not (-.6 <= policy["camera_expected_ground_z_m"] <= -.05
             and .005 <= policy["camera_ground_tolerance_m"] <= .1
             and policy["camera_ground_z_min_m"] < policy["camera_ground_z_max_m"]):
@@ -207,10 +219,21 @@ def validate(config, base=None):
     gait_output = topic(config.get("gait_output_topic", "/robonix/nomotion/outdoor_gait"))
     if gait_output in (*bindings.values(), output, "/GAIT"):
         raise ValueError("Gait requests need a separate guarded UInt32 output topic")
+    from .terrain_config import validate_terrain
+    terrain = validate_terrain(config.get("terrain", {}), policy, segmentation, gait_enabled)
+    if not 0.5 <= policy["camera_max_range_m"] <= 10:
+        raise ValueError("camera_max_range_m must be within [0.5, 10]")
     normalized = {**config, "params_file": str(path.resolve())}
     nav2, derived, grid = prepare(normalized, bindings, policy)
     projection = projection_config(config, policy)
     policy.update(derived)
+    terrain = validate_terrain(config.get("terrain", {}), policy, segmentation, gait_enabled)
+    if terrain["enabled"] and terrain["can_climb_stairs"]:
+        from .nav2_parameters import parameters
+        stairs = parameters(nav2, "controller_server").get("StairsFollowPath", {})
+        if (stairs.get("plugin") != "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+                or stairs.get("use_collision_detection") is not True):
+            raise ValueError("Terrain stairs require StairsFollowPath RPP with use_collision_detection: true")
     return {
         **config,
         "params_file": str(path.resolve()),
@@ -223,6 +246,7 @@ def validate(config, base=None):
         "nav2_params": nav2,
         "scan_projection": projection,
         "semantic_segmentation": segmentation,
+        "terrain": terrain,
         **({"run_dir": str((base / Path(config["run_dir"]).expanduser()).resolve())} if "run_dir" in config else {}),
     }
 

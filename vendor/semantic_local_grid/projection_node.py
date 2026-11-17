@@ -31,7 +31,7 @@ class Projection(Node):
           'grid_alignment':'planning',
           'offline_completion':False,'prior_x_min':-0.3,'prior_x_max':1.3,
           'prior_half_width':0.6,'completion_kernel':9,'completion_road_ratio':0.55,
-          'sync_slop':0.05,'sync_queue':60,'depth_scale':0.001,'depth_min':0.2,'depth_max':8.0,
+          'sync_slop':0.05,'sync_queue':60,'depth_scale':0.001,'depth_min':0.2,'depth_max':8.0,'forward_range':4.0,'slope_envelope':False,'slope_angle_deg':15.0,'ground_reference_z':-.18,
           'ground_z_min':0.0,'ground_z_max':0.0,'ground_limits_confirmed':False,
           'resolution':0.05,'width':160,'height':160,'origin_x':-2.0,'origin_y':-4.0,
           'pixel_stride':2,'opening':False,'closing':False,'morph_kernel':3,
@@ -146,7 +146,12 @@ class Projection(Node):
                 # Snap world-aligned grid origin to cell boundaries; no robot yaw in grid axes.
                 offsets=np.array([p['origin_x'],p['origin_y']])
                 robot_xy=np.floor((robot_xy+offsets)/p['resolution'])*p['resolution']-offsets
+            in_range=(base_points[:,0]>0)&(np.linalg.norm(base_points[:,:2],axis=1)<=p['forward_range'])
+            base_points,labels=base_points[in_range],labels[in_range]
             ground=(base_points[:,2]>=p['ground_z_min'])&(base_points[:,2]<=p['ground_z_max'])
+            if p['slope_envelope']:
+                allowance=np.linalg.norm(base_points[:,:2],axis=1)*np.tan(np.deg2rad(p['slope_angle_deg']))
+                ground=(np.abs(base_points[:,2]-p['ground_reference_z'])<=allowance+.10)
             points=transform(base_points[ground],planning_matrix);labels=labels[ground]
             grid,self.origin=rasterize(points,labels,p['resolution'],p['width'],p['height'],
                                       p['origin_x'],p['origin_y'],robot_xy,self.yaw)

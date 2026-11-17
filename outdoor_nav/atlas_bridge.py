@@ -24,6 +24,7 @@ service = Service(
 manager = RuntimeManager()
 channels = {}
 CONTRACTS = {
+    "imu": "robonix/primitive/imu/imu",
     "cloud": "robonix/primitive/lidar/lidar3d",
     "odom": "robonix/service/localization/odom",
     "localization": "robonix/service/localization/status",
@@ -36,6 +37,8 @@ CONTRACTS = {
 def resolve(config):
     config = {**config, "topic_remap": dict(config.get("topic_remap", {}))}
     for role, contract in CONTRACTS.items():
+        if role == "imu" and not config.get("terrain", {}).get("enabled", False):
+            continue
         if role == "cloud" and not config.get("policy", {}).get("lidar_enabled", True):
             continue
         if role.startswith("camera_") and not config.get("policy", {}).get("camera_enabled", False):

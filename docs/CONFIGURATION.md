@@ -18,7 +18,7 @@
 服务示例 YAML 是可复制的完整结构；机器人实际调参应在部署副本中完成。
 不在服务启动代码中重建 costmap、补入控制器或覆盖 YAML 中的调参。
 `params_file` 和权重相对活动 manifest 所在目录解析，使用 `RBNX_INVOCATION_CWD`；
-权重路径可以是文件或目录，具体格式由适配器验证。可选 SegFormer 适配器要求含权重、`config.json` 和 `preprocessor_config.json` 的本地目录；配置示例及接口约定见 README。
+权重路径可以是文件或目录，具体格式由适配器验证。可选 SegFormer 适配器要求含权重和 `config.json` 的本地目录。预处理可从 `preprocessor_config.json` 读取，也可用 `options.preprocessing` 显式配置。详见 README。
 `run_dir` 显式为相对路径时也遵循这一规则。
 
 ## 话题绑定和生效参数
@@ -100,3 +100,6 @@ YAML 支持以下占位符，绑定到 `topic_remap` 显式值或 Atlas 解析�
 
 配置中的未知顶层字段、未知角色、错误类型、非有限数值、无效投影边界、未知 topic token、
 缺少的必要 Nav2 段均在启动子进程前拒绝。运动默认保持关闭。
+
+
+地形状态机、四路优先级、共享坡度阈值与新参数见 [地形导航说明](TERRAIN.md)。新状态机和高度阈值需显式开启；视觉前向距离默认 4 m，保留原有传感器独立开关。

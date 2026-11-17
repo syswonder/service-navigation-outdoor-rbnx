@@ -104,6 +104,7 @@ class SceneNavigation:
             if self.localization:
                 self.localization.bind(snapshot)
             self.current_map = {k:snapshot[k] for k in ('map_id', 'version', 'origin_wgs84')}
+            self.current_map['reference_point'] = snapshot.get('reference_point', 'gnss_antenna')
 
     def status(self, *_):
         value = self.execution.status()
@@ -116,7 +117,7 @@ class SceneNavigation:
             and reference.get("map_id") == current["map_id"]
             and reference.get("version") == current["version"]
             and reference.get("map_offset_xy_m") == [0.0, 0.0]
-            and reference.get("antenna_xy_m") == [0.0, 0.0]
+            and (current.get('reference_point') == 'base_link' or reference.get("antenna_xy_m") == [0.0, 0.0])
             and reference.get("reference_point") == "base_link"
         )
         value = {**value, "coordinate_reference_matches_map": matches}
@@ -163,7 +164,8 @@ class SceneNavigation:
             status = self.status()
             if not status["ready"]:
                 raise ApiError(503, "Navigation is not ready: " + str(status.get("not_ready_reasons", [])))
-            if (route.get("frame_id") != "map"
+            if (route.get('reference_point', 'gnss_antenna') != (self.current_map or {}).get('reference_point')
+                    or route.get("frame_id") != "map"
                     or route.get("origin_wgs84") != (self.current_map or {}).get("origin_wgs84")
                     or (self.current_map and any(route.get(k) != self.current_map[k] for k in ('map_id','version')))):
                 raise ApiError(409, "Route differs from the loaded map and localization reference")
@@ -174,7 +176,7 @@ class SceneNavigation:
                     "request_id":request_id,"localization_grade":grade,
                     "arrival_tolerance_m":self.policy[grade+"_arrival_m"],
                     "map_id":route["map_id"],"version":route["version"],
-                    "origin_wgs84":route["origin_wgs84"],"intervals":route.get("intervals",[])}
+                    "origin_wgs84":route["origin_wgs84"],"reference_point":route.get("reference_point", "gnss_antenna"),"intervals":route.get("intervals",[])}
         return self._follow_recorded(request_id,source,build)
 
     def cancel(self, run_id):

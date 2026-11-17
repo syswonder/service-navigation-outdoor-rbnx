@@ -40,6 +40,7 @@ class Task:
     origin_wgs84: dict | None = None
     intervals: list = field(default_factory=list)
     gait_status: dict | None = None
+    terrain_status: dict | None = None
 
 
 class TaskStore:

@@ -89,9 +89,13 @@ class OutdoorExecutor(Executor):
             for n in ("planner_server", "controller_server")
         }
         self.command_pub = self.create_publisher(Twist, "/outdoor/safe_command", 10)
+        self.terrain = None
         self.gait_schedule = self.gait_task = None
         self.gait_pub = (self.create_publisher(UInt32, self.runtime["gait_output_topic"], 10)
                          if self.runtime.get("gait_switching_enabled", False) else None)
+        if self.runtime.get("terrain", {}).get("enabled"):
+            from .terrain_execution import TerrainExecution
+            self.terrain = TerrainExecution(self)
         self.path_pub = self.create_publisher(
             NavPath, "/navigation/execution_path", LATCHED
         )
@@ -156,6 +160,9 @@ class OutdoorExecutor(Executor):
 
     def gait_tick(self):
         with self.state_lock:
+            if getattr(self, "terrain", None) is not None:
+                self.terrain.tick()
+                return
             task = self.tasks.snapshot(self.owner) if self.owner else None
             if (self.gait_pub is None or not task or task["cancel_requested"]
                     or task["state"] not in ("planning", "navigating", "replanning")
@@ -191,10 +198,28 @@ class OutdoorExecutor(Executor):
             if not status["motion_allowed"]:
                 self.command_pub.publish(Twist())
 
+    def safety_tick(self):
+        if getattr(self, "terrain", None) is None:
+            return super().safety_tick()
+        with self.state_lock:
+            task = self.tasks.snapshot(self.owner, include_paths=False) if self.owner else None
+            ready = bool(task and not task["cancel_requested"]
+                         and task["state"] in ("planning", "navigating", "replanning")
+                         and self.status(False)["ready"])
+            aligning = self.terrain.result["phase"] == "align"
+            safe = ready and (aligning or (not self.stopping and
+                time.monotonic()-self.raw_received < self.config["command_timeout_s"]))
+            self.command_pub.publish(self.terrain.command(safe, self.raw_command))
+
     def controller_id(self):
+        if getattr(self, "terrain", None) is not None:
+            r = self.terrain.result
+            return "StairsFollowPath" if r["state"] == "stairs_up" and r["phase"] == "climb" else "FollowPath"
         return "StairsFollowPath" if self.gait_schedule and self.gait_schedule.target == STAIRS else "FollowPath"
 
     def motion_allowed(self, task):
+        if getattr(self, "terrain", None) is not None:
+            return self.terrain.result["motion_allowed"]
         if not task or not task.get("intervals"):
             return True
         state = task.get("gait_status") or {}
@@ -207,6 +232,10 @@ class OutdoorExecutor(Executor):
                 and getattr(self, "active_controller", None) == self.controller_id())
 
     async def wait_for_ready_pose(self, task_id):
+        if getattr(self, "terrain", None) is not None:
+            if self.terrain.result["failed"]:
+                raise RuntimeError("Terrain supervisor stopped: " + self.terrain.result["reason"])
+            return await super().wait_for_ready_pose(task_id)
         was_stopping = self.stopping
         while True:
             position = await super().wait_for_ready_pose(task_id)
@@ -223,7 +252,7 @@ class OutdoorExecutor(Executor):
             await self.pause(.05)
 
     def path_obstructed(self, points, position):
-        if self.controller_id() == "StairsFollowPath":
+        if self.terrain is None and self.controller_id() == "StairsFollowPath":
             return False
         return super().path_obstructed(points, position)
 
@@ -328,6 +357,7 @@ class OutdoorExecutor(Executor):
             "health": health,
             "localization_grade": g.get("grade"),
             "coordinate_reference": g.get("coordinate_reference"),
+            "terrain_status": self.terrain.result if self.terrain is not None else None,
             "gait_status": owned.get("gait_status") if owned else None,
             "gait_switching_enabled": self.runtime.get("gait_switching_enabled", False),
             "local_avoidance_enabled": not self.owner or self.controller_id() == "FollowPath",
@@ -410,6 +440,8 @@ class OutdoorExecutor(Executor):
         result = await self.result(self.controller_parameters.call_async(req), task_id)
         if not result.result.successful:
             raise RuntimeError("Controller rejected the task arrival tolerance")
+        if getattr(self, "terrain", None) is not None:
+            self.terrain.prepared_task = task_id
 
     async def guided_path(self, guidance, window, position, task_id):
         if self.controller_id() != "StairsFollowPath":

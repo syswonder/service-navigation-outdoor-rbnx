@@ -33,9 +33,21 @@ service:
         classes: {} # model ID -> class name, including slopes/stairs if supported
         road_classes: [] # class names used for the existing road preference mask
         options: {}
+      terrain:
+        enabled: false # Opt in after binding IMU and semantic sources; docs/TERRAIN.md
+        slope_filter_enabled: false
+        slope_angle_deg: 15.0
+        ground_z_m: -0.18 # Measure ground z in base_link, not lidar mounting height
+        can_climb_stairs: false # Ranger is wheeled
+        stairs_classes: [] # Names from semantic_segmentation.classes, e.g. [stairs]
+        flat_gait_code: null # Real guarded chassis command/feedback codes
+        upstairs_gait_code: null
       policy:
+        camera_max_range_m: 4.0
         lidar_enabled: true
         camera_enabled: false
+        camera_geometry_enabled: true
+        camera_blind_zone_m: 0.0
         camera_frame_confirmed: false
         camera_expected_ground_z_m: -0.18
         motion_enabled: false

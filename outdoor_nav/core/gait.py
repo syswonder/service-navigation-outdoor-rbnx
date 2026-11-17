@@ -14,7 +14,7 @@ def route_length(reference):
     return sum(distance(a, b) for a, b in zip(reference, reference[1:]))
 
 
-def validate_intervals(reference, intervals):
+def validate_intervals(reference, intervals, *, check_codes=True):
     if not isinstance(intervals, list) or len(intervals) > 8192:
         raise ValueError("intervals must be a bounded list")
     total, previous, result = route_length(reference), 0.0, []
@@ -31,9 +31,9 @@ def validate_intervals(reference, intervals):
             raise ValueError("Unknown gait annotation")
         if code is not None and (type(code) is not int or not 0 <= code <= 0xffffffff):
             raise ValueError("Invalid actual gait code")
-        if gait in RAW_GAITS and code not in RAW_GAITS[gait]:
+        if check_codes and gait in RAW_GAITS and code not in RAW_GAITS[gait]:
             raise ValueError("Gait label and recorded code disagree")
-        if gait == "unknown" and any(code in codes for codes in RAW_GAITS.values()):
+        if check_codes and gait == "unknown" and any(code in codes for codes in RAW_GAITS.values()):
             raise ValueError("Known gait code cannot be labelled unknown")
         previous = b
         result.append({**deepcopy(raw), "start_m": float(a), "end_m": float(b)})
