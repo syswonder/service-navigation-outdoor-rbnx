@@ -89,6 +89,7 @@ class OutdoorExecutor(Executor):
             for n in ("planner_server", "controller_server")
         }
         self.command_pub = self.create_publisher(Twist, "/outdoor/safe_command", 10)
+        self.cycle = None
         self.terrain = None
         self.gait_schedule = self.gait_task = None
         self.gait_pub = (self.create_publisher(UInt32, self.runtime["gait_output_topic"], 10)
@@ -96,6 +97,9 @@ class OutdoorExecutor(Executor):
         if self.runtime.get("terrain", {}).get("enabled"):
             from .terrain_execution import TerrainExecution
             self.terrain = TerrainExecution(self)
+        if self.runtime.get("decision_cycle", {}).get("enabled"):
+            from .cycle_runtime import CycleNavigation
+            self.cycle = CycleNavigation(self)
         self.path_pub = self.create_publisher(
             NavPath, "/navigation/execution_path", LATCHED
         )
@@ -159,6 +163,8 @@ class OutdoorExecutor(Executor):
             self.startup_stopped = True
 
     def gait_tick(self):
+        if getattr(self, "cycle", None) is not None:
+            return  # Exactly one FSM step is owned by each decision cycle.
         with self.state_lock:
             if getattr(self, "terrain", None) is not None:
                 self.terrain.tick()
@@ -199,6 +205,9 @@ class OutdoorExecutor(Executor):
                 self.command_pub.publish(Twist())
 
     def safety_tick(self):
+        if getattr(self, "cycle", None) is not None and not self.cycle.allowed():
+            self.command_pub.publish(Twist())
+            return
         if getattr(self, "terrain", None) is None:
             return super().safety_tick()
         with self.state_lock:
@@ -258,6 +267,8 @@ class OutdoorExecutor(Executor):
 
     def on_geo(self, msg):
         self._state(msg, "geo")
+        if self.cycle is not None:
+            self.cycle.sample(self.geo)
 
     def on_guard(self, msg):
         self._state(msg, "guard")
@@ -352,6 +363,7 @@ class OutdoorExecutor(Executor):
         pose = self.pose()
         health["tf"] = pose is not None and pose["age_s"] < t
         return {
+            "decision_cycle": {**self.cycle.report,"ready":bool(self.cycle.report.get('ready') and self.cycle.allowed())} if self.cycle is not None else None,
             "schema_version": 1,
             "ready": all(health.values()),
             "health": health,
@@ -409,6 +421,8 @@ class OutdoorExecutor(Executor):
         if bytes(handle.goal_id.uuid).hex() not in self.tasks.tasks:
             handle.abort()
             return NavigateToPose.Result()
+        if self.cycle is not None:
+            return await self.cycle.execute(handle)
         return await super().execute(handle)
 
     def arrival_heading_ok(self, position, goal):

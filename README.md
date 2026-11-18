@@ -10,6 +10,8 @@
 字段、单位和旧配置迁移见 [配置说明](docs/CONFIGURATION.md) 与 `config.spec`。
 实际生效配置写入运行目录的 `effective_nav2.yaml`。
 
+可选的 [周期式方向引导](docs/DECISION_CYCLE.md) 保留密集地图点，按至少 6 米及显著拐角生成提示队列；配对定位用于平均 odom 提示点，单周期传感器快照用于局部绕行。默认关闭。显式开启后会将两个 costmap 改为 odom 滚动快照层，详见配置与时效规则；这不构成实机运动验证。
+
 ## 原视觉链路与检测后过滤
 
 相机链路沿用 xiangruicheng 当前 geometry_assisted/rtabmap 实现：

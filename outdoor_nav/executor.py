@@ -142,10 +142,11 @@ class Executor(Node):
         try:
             task = self.tasks.snapshot() or {}
             points = task.get("execution_path") or []
-            if frame == "map":
+            path_frame = task.get("execution_frame", "map")
+            if frame == path_frame:
                 path = points
             elif points:
-                transform = self.tf.lookup_transform(frame, "map", rclpy.time.Time())
+                transform = self.tf.lookup_transform(frame, path_frame, rclpy.time.Time())
                 t, angle = (
                     transform.transform.translation,
                     yaw(transform.transform.rotation),

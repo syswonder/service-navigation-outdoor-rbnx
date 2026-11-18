@@ -27,6 +27,8 @@ properties:
     additionalProperties: false
     description: Absolute ROS topics. Explicit values take priority over Atlas for cloud/odom/localization. Other roles bind wrapper endpoints; Nav2 consumes the matching topic tokens.
     properties:
+      cycle_costmap: {type: string, default: /outdoor/cycle/costmap}
+      cycle_ack: {type: string, default: /outdoor/cycle/costmap_ack}
       imu: {type: string, default: /wit_10axis/data}
       visual_terrain: {type: string, default: /outdoor/vision/terrain}
       lidar_terrain: {type: string, default: /outdoor/lidar/terrain}
@@ -514,3 +516,34 @@ properties:
             lidar_semantics: 90
             lidar_obstacles: 60
             visual_obstacles: 50
+  decision_cycle:
+    type: object
+    additionalProperties: false
+    properties:
+      enabled:
+        type: boolean
+        default: false
+      period_s:
+        type: number
+        default: 2.0
+      hint_spacing_m:
+        type: number
+        default: 6.0
+      corner_error_m:
+        type: number
+        default: 0.3
+      arrival_side_m:
+        type: number
+        default: 3.0
+      lookahead_m:
+        type: number
+        default: 3.0
+      grid_resolution_m:
+        type: number
+        default: 0.1
+      grid_half_width_m:
+        type: number
+        default: 8.0
+      sample_limit:
+        type: integer
+        default: 512

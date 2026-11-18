@@ -7,6 +7,7 @@
 #include <nav2_costmap_2d/layered_costmap.hpp>
 #include <nav2_costmap_2d/cost_values.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <tf2_ros/buffer.h>
 #include <pluginlib/class_list_macros.hpp>
 
@@ -21,7 +22,11 @@ public:
     declareParameter("enabled", rclcpp::ParameterValue(true));
     declareParameter("grid_topic", rclcpp::ParameterValue(std::string("/outdoor/vision/filtered_costmap")));
     declareParameter("max_age_s", rclcpp::ParameterValue(1.0));
+    declareParameter("ack_topic", rclcpp::ParameterValue(std::string("")));
     auto node = node_.lock();
+    std::string ack_topic;
+    node->get_parameter(name_ + ".ack_topic", ack_topic);
+    if (!ack_topic.empty()) {ack_ = node->create_publisher<std_msgs::msg::String>(ack_topic, 10);}
     std::string topic;
     node->get_parameter(name_ + ".enabled", enabled_);
     node->get_parameter(name_ + ".grid_topic", topic);
@@ -84,6 +89,12 @@ public:
         master.setCost(x,y,before==nav2_costmap_2d::NO_INFORMATION ? cost : std::max(before,cost));
       }
     }
+    if (ack_) {
+      std_msgs::msg::String message;
+      message.data = std::string(node->get_namespace()) + "/" + node->get_name() + ":" +
+        std::to_string(rclcpp::Time(grid->header.stamp).nanoseconds());
+      ack_->publish(message);
+    }
   }
 
   void reset() override {std::lock_guard<std::mutex> lock(mutex_); grid_.reset();}
@@ -98,6 +109,7 @@ private:
   std::mutex mutex_;
   /// Maximum accepted sensor acquisition age in seconds.
   double max_age_{1.0};
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr ack_;
 };
 }
 PLUGINLIB_EXPORT_CLASS(outdoor_camera_layer::CameraLayer, nav2_costmap_2d::Layer)

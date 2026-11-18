@@ -21,8 +21,8 @@ def submit(node, payload):
     if payload.get("frame_id") != "map":
         raise ValueError("Reference frame must be map")
     reference = payload.get("reference_path")
-    if not isinstance(reference, list) or not 1 <= len(reference) <= 4096:
-        raise ValueError("Reference needs 1..4096 finite points")
+    if not isinstance(reference, list) or not 1 <= len(reference) <= 65536:
+        raise ValueError("Reference needs 1..65536 finite points")
     reference = [validate_point(p) for p in reference]
     goal = validate_point(payload.get("goal"))
     if reference[-1] != goal:

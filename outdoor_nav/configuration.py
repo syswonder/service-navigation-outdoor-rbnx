@@ -60,6 +60,8 @@ DEFAULTS = {
     "heading_source": "wit_imu",
 }
 TOPICS = {
+    "cycle_costmap": "/outdoor/cycle/costmap",
+    "cycle_ack": "/outdoor/cycle/costmap_ack",
     "imu": "/wit_10axis/data",
     "visual_terrain": "/outdoor/vision/terrain",
     "lidar_terrain": "/outdoor/lidar/terrain",
@@ -101,7 +103,7 @@ def topic(value):
 def validate(config, base=None):
     if not isinstance(config, dict):
         raise ValueError("Service config must be an object")
-    allowed = {"terrain", "params_file", "provider_ids", "topic_remap", "semantic_segmentation",
+    allowed = {"decision_cycle", "terrain", "params_file", "provider_ids", "topic_remap", "semantic_segmentation",
                "policy", "scan_projection", "velocity_output_topic", "gait_switching_enabled",
                "gait_output_topic", "global_grid", "run_dir", "http_port", "action_wait_s", "worker_python"}
     if set(config) - allowed:
@@ -129,7 +131,11 @@ def validate(config, base=None):
     path = path if path.is_absolute() else base / path
     if not path.is_file():
         raise ValueError("params_file does not exist")
+    from .cycle_config import validate_cycle
+    cycle = validate_cycle(config.get("decision_cycle", {}))
     policy = {**DEFAULTS, **config.get("policy", {})}
+    if cycle["enabled"]:
+        policy["sensor_timeout_s"] = cycle["period_s"]
     if set(policy) - DEFAULTS.keys():
         raise ValueError(
             "Unknown policy keys: " + str(sorted(set(policy) - DEFAULTS.keys()))
@@ -225,9 +231,24 @@ def validate(config, base=None):
         raise ValueError("camera_max_range_m must be within [0.5, 10]")
     normalized = {**config, "params_file": str(path.resolve())}
     nav2, derived, grid = prepare(normalized, bindings, policy)
+    if cycle["enabled"]:
+        internal = {bindings['cycle_costmap'],bindings['cycle_ack']}
+        inputs = {v for k,v in bindings.items() if k not in ('cycle_costmap','cycle_ack')}
+        if len(internal)!=2 or internal & inputs:
+            raise ValueError('Cycle snapshot and acknowledgment topics must be distinct from sensor inputs')
+        configure_cycle_nav2(nav2, bindings, cycle)
+        grid = dict(origin=[-cycle['grid_half_width_m']]*2,
+                    width=int(math.ceil(2*cycle['grid_half_width_m'])),
+                    height=int(math.ceil(2*cycle['grid_half_width_m'])),
+                    resolution=cycle['grid_resolution_m'],rolling=True)
+        terrain["observation_timeout_s"] = cycle["period_s"]
     projection = projection_config(config, policy)
     policy.update(derived)
     terrain = validate_terrain(config.get("terrain", {}), policy, segmentation, gait_enabled)
+    if cycle["enabled"]:
+        terrain["observation_timeout_s"] = cycle["period_s"]
+        if not terrain["enabled"]:
+            raise ValueError("decision_cycle.enabled requires terrain.enabled for one FSM step per cycle")
     if terrain["enabled"] and terrain["can_climb_stairs"]:
         from .nav2_parameters import parameters
         stairs = parameters(nav2, "controller_server").get("StairsFollowPath", {})
@@ -247,9 +268,28 @@ def validate(config, base=None):
         "scan_projection": projection,
         "semantic_segmentation": segmentation,
         "terrain": terrain,
+        "decision_cycle": cycle,
         **({"run_dir": str((base / Path(config["run_dir"]).expanduser()).resolve())} if "run_dir" in config else {}),
     }
 
 
 def load_runtime(path):
     return json.loads(Path(path).read_text())
+
+def configure_cycle_nav2(nav2, topics, cycle):
+    """Explicit opt-in replaces live sensor layers with one frozen odom snapshot."""
+    from .nav2_parameters import parameters
+    for name in ('global_costmap','local_costmap'):
+        block=parameters(nav2,name)
+        extras=set(block['plugins'])-{'lidar_layer','camera_layer','inflation_layer'}
+        if extras:
+            raise ValueError('Decision cycle cannot freeze additional costmap layers: '+str(sorted(extras)))
+        block['global_frame']='odom'
+        block['rolling_window']=True
+        block['width']=block['height']=int(math.ceil(2*cycle['grid_half_width_m']))
+        block['resolution']=cycle['grid_resolution_m']
+        block['origin_x']=block['origin_y']=-cycle['grid_half_width_m']
+        block['plugins']=['cycle_layer','inflation_layer']
+        block['cycle_layer']={'plugin':'outdoor_camera_layer::CameraLayer','enabled':True,
+            'grid_topic':topics['cycle_costmap'],'ack_topic':topics['cycle_ack'],
+            'max_age_s':cycle['period_s']}
