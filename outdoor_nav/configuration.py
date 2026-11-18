@@ -279,17 +279,19 @@ def load_runtime(path):
 def configure_cycle_nav2(nav2, topics, cycle):
     """Explicit opt-in replaces live sensor layers with one frozen odom snapshot."""
     from .nav2_parameters import parameters
-    for name in ('global_costmap','local_costmap'):
-        block=parameters(nav2,name)
-        extras=set(block['plugins'])-{'lidar_layer','camera_layer','inflation_layer'}
-        if extras:
-            raise ValueError('Decision cycle cannot freeze additional costmap layers: '+str(sorted(extras)))
-        block['global_frame']='odom'
-        block['rolling_window']=True
-        block['width']=block['height']=int(math.ceil(2*cycle['grid_half_width_m']))
-        block['resolution']=cycle['grid_resolution_m']
-        block['origin_x']=block['origin_y']=-cycle['grid_half_width_m']
-        block['plugins']=['cycle_layer','inflation_layer']
-        block['cycle_layer']={'plugin':'outdoor_camera_layer::CameraLayer','enabled':True,
-            'grid_topic':topics['cycle_costmap'],'ack_topic':topics['cycle_ack'],
-            'max_age_s':cycle['period_s']}
+    local = parameters(nav2, 'local_costmap')
+    if 'camera_layer' in local['plugins']:
+        local['camera_layer']['max_age_s'] = cycle['period_s']
+    block = parameters(nav2, 'global_costmap')
+    extras=set(block['plugins'])-{'lidar_layer','camera_layer','inflation_layer'}
+    if extras:
+        raise ValueError('Decision cycle cannot freeze additional costmap layers: '+str(sorted(extras)))
+    block['global_frame']='odom'
+    block['rolling_window']=True
+    block['width']=block['height']=int(math.ceil(2*cycle['grid_half_width_m']))
+    block['resolution']=cycle['grid_resolution_m']
+    block['origin_x']=block['origin_y']=-cycle['grid_half_width_m']
+    block['plugins']=['cycle_layer','inflation_layer']
+    block['cycle_layer']={'plugin':'outdoor_camera_layer::CameraLayer','enabled':True,
+        'grid_topic':topics['cycle_costmap'],'ack_topic':topics['cycle_ack'],
+        'max_age_s':cycle['period_s']}

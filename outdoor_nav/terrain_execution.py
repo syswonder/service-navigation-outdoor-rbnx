@@ -60,7 +60,8 @@ class TerrainExecution:
     def command(self, safe, command):
         n, result = self.node, self.result
         out = Twist()
-        if not safe or time.monotonic()-self.at >= (n.runtime['decision_cycle']['period_s'] if n.runtime.get('decision_cycle',{}).get('enabled') else n.config['command_timeout_s']):
+        cyclic = n.runtime.get('decision_cycle', {}).get('enabled', False)
+        if not safe or (not cyclic and time.monotonic() - self.at >= n.config['command_timeout_s']):
             return out
         if result['angular_z'] and result['phase'] == 'align':
             # Rotation sweeps the footprint; check the actual fused local costmap.

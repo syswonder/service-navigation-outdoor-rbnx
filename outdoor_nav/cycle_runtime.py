@@ -26,6 +26,7 @@ class CycleNavigation:
         self.scan = self.camera = None
         self.acks = {}
         self.number, self.valid_until = 0, -math.inf
+        self.active_result = None
         self.report = {'enabled': True, 'ready': False}
         self.history = deque(maxlen=100)
         t = node.runtime['topic_remap']
@@ -34,7 +35,15 @@ class CycleNavigation:
         if node.config['lidar_enabled']:
             node.create_subscription(LaserScan, t['scan'], lambda m:setattr(self,'scan',m), qos_profile_sensor_data)
         if node.config['camera_enabled']:
-            node.create_subscription(OccupancyGrid, t['camera_costmap'], lambda m:setattr(self,'camera',m), 5)
+            node.create_subscription(OccupancyGrid, t['camera_costmap'], self.on_camera, 5)
+
+    def on_camera(self, msg):
+        # Invalid certificates produce a fresh, entirely unknown grid.
+        # Its arrival must invalidate the handoff, not renew sensor freshness.
+        valid = (msg.header.frame_id == 'odom'
+                 and len(msg.data) == msg.info.width * msg.info.height
+                 and np.any(np.frombuffer(msg.data, dtype=np.int8) >= 0))
+        self.camera = msg if valid else None
 
     def ack(self, msg):
         try:
@@ -66,7 +75,20 @@ class CycleNavigation:
             return
 
     def allowed(self):
-        return time.monotonic() < self.valid_until
+        if time.monotonic() >= self.valid_until:
+            return False
+        if self.active_result is not None and self.active_result.done():
+            return False
+        now = self.n.get_clock().now().nanoseconds / 1e9
+        sources = []
+        if self.n.config['lidar_enabled']:
+            sources.append(self.scan)
+        if self.n.config['camera_enabled']:
+            sources.append(self.camera)
+        return bool(sources) and all(
+            msg is not None and 0 <= now - Time.from_msg(msg.header.stamp).nanoseconds / 1e9 < self.p['period_s']
+            for msg in sources
+        )
 
     async def future(self, future, task, deadline):
         while not future.done():
@@ -108,21 +130,8 @@ class CycleNavigation:
                 # Missed slots are skipped, never replayed as a burst of decisions.
                 boundary += (max(0, math.floor((started-boundary)/self.p['period_s']))+1)*self.p['period_s']
                 self.number += 1
-                self.valid_until = -math.inf
-                n.stopping = True
-                n.command_pub.publish(Twist())
                 timings = {}
                 try:
-                    # Stop the old action before its frozen grid expires. A zero
-                    # output gate alone does not stop Nav2 computing on old costs.
-                    release_started = time.monotonic()
-                    for request in requests:
-                        if request.done() and request in results and not results[request].done():
-                            previous = request.result()
-                            if previous.accepted:
-                                await self.future(previous.cancel_goal_async(),task,boundary)
-                                await self.future(results[request],task,boundary)
-                    timings['controller_release_ms']=(time.monotonic()-release_started)*1000
                     requests[:] = [r for r in requests if r not in results or not results[r].done()]
                     results = {r:f for r,f in results.items() if r in requests}
                     state_started=time.monotonic()
@@ -145,6 +154,8 @@ class CycleNavigation:
                     if queue.final and math.hypot(x,y) <= final_tolerance:
                         actual = body_delta(queue.target, samples[-1]['map_pose'])
                         if math.hypot(*actual) <= final_tolerance and n.arrival_heading_ok(samples[-1]['map_pose'],item['goal']):
+                            self.valid_until = -math.inf
+                            n.stopping = True
                             if not await n.release_controller(requests, results) or not await n.confirm_stop():
                                 raise RuntimeError('Could not confirm final stop')
                             # A GNSS correction during braking must not fabricate completion.
@@ -159,6 +170,19 @@ class CycleNavigation:
                     stage = time.monotonic()
                     if n.terrain is not None:
                         n.terrain.tick()
+                    motion_allowed = n.terrain.result['motion_allowed']
+                    controller_id = n.controller_id()
+                    if not motion_allowed or (requests and n.active_controller != controller_id):
+                        self.valid_until = -math.inf
+                        self.active_result = None
+                        n.stopping = True
+                        n.command_pub.publish(Twist())
+                        stage_release = time.monotonic()
+                        if not await n.release_controller(requests, results):
+                            raise RuntimeError('Could not release controller for terrain transition')
+                        requests.clear()
+                        results.clear()
+                        timings['controller_release_ms'] = (time.monotonic()-stage_release)*1000
                     timings['fsm_ms'] = (time.monotonic()-stage)*1000
                     stage = time.monotonic()
                     # Acquire the first post-FSM processed observations. This prevents a
@@ -181,8 +205,8 @@ class CycleNavigation:
                     ack_started = time.monotonic()
                     self.pub.publish(snapshot)
                     token = snapshot.header.stamp.sec*10**9+snapshot.header.stamp.nanosec
-                    while not all(any(part in key and value == token for key,value in self.acks.items())
-                                  for part in ('global_costmap','local_costmap')):
+                    while not any('global_costmap' in key and value == token
+                                  for key,value in self.acks.items()):
                         if n.interrupted(task):
                             raise InterruptedError('Canceled waiting for costmaps')
                         if time.monotonic() >= boundary:
@@ -200,6 +224,7 @@ class CycleNavigation:
                                            action=n.terrain.result['phase'],timings_ms=timings,
                                            compute_ms=(time.monotonic()-started)*1000)
                         self.history.append(self.report)
+                        budget.planned(True,time.monotonic())
                         continue
                     stage = time.monotonic()
                     if controller_attempted and not budget.controller_ended(stage):
@@ -211,7 +236,7 @@ class CycleNavigation:
                     timings['planning_ms'] = (time.monotonic()-stage)*1000
                     stage = time.monotonic()
                     command = FollowPath.Goal()
-                    command.path, command.controller_id = path, n.controller_id()
+                    command.path, command.controller_id = path, controller_id
                     command.goal_checker_id = 'goal_checker'
                     pending = n.follow_client.send_goal_async(command)
                     requests.append(pending)
@@ -226,10 +251,16 @@ class CycleNavigation:
                     if not follower.accepted:
                         raise ValueError('Controller rejected cycle path')
                     results[pending] = follower.get_result_async()
+                    self.active_result = results[pending]
                     n.active_controller = command.controller_id
                     timings['controller_accept_ms'] = (time.monotonic()-stage)*1000
                     remaining_age = oldest+self.p['period_s']-n.get_clock().now().nanoseconds/1e9
-                    self.valid_until = min(boundary, time.monotonic()+max(0.,remaining_age))
+                    if remaining_age <= 0:
+                        raise TimeoutError('Planning snapshot expired before handoff')
+                    # Allow the accepted path through the following refresh.
+                    # Live obstacle data and the raw command watchdog still
+                    # gate every command independently of this retry deadline.
+                    self.valid_until = boundary + self.p['period_s']
                     if not self.allowed():
                         raise TimeoutError('Cycle result or source data expired before use')
                     n.stopping = False
@@ -249,6 +280,7 @@ class CycleNavigation:
                     results = {r:f for r,f in results.items() if r in requests}
                 except (ValueError, TimeoutError) as exc:
                     self.valid_until = -math.inf
+                    n.stopping = True
                     n.command_pub.publish(Twist())
                     for request in requests:
                         if request.done() and not request.cancelled():
@@ -270,6 +302,7 @@ class CycleNavigation:
         finally:
             if n.owner == task:
                 self.valid_until = -math.inf
+                self.active_result = None
                 self.report={**self.report,'ready':False,'task_outcome':outcome,'reason':reason}
                 n.stopping = True
                 released = await n.release_controller(requests, results)
