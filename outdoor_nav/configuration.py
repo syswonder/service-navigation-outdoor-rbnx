@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 
 from .nav2_parameters import prepare, projection_config
+from .ground_reference import load_ground_reference
 
 DEFAULTS = {
     "lidar_enabled": True,
@@ -15,7 +16,12 @@ DEFAULTS = {
     "camera_blind_zone_m": 0.0,
     "camera_max_range_m": 4.0,
     "camera_frame_confirmed": False,
-    "camera_expected_ground_z_m": -0.18,
+    # Mount pose of the depth camera in base_link: the driver publishes its own
+    # link -> optical frames, so only this one static transform is missing.
+    "camera_frame": "camera_gemini330_link",
+    "camera_mount_xyz_m": [0.0, 0.0, 0.0],
+    "camera_mount_rpy_deg": [0.0, 0.0, 0.0],
+    "camera_expected_ground_z_m": None,
     "camera_ground_tolerance_m": 0.05,
     "camera_ground_z_min_m": -0.45,
     "camera_ground_z_max_m": 0.15,
@@ -103,12 +109,12 @@ def topic(value):
 def validate(config, base=None):
     if not isinstance(config, dict):
         raise ValueError("Service config must be an object")
-    allowed = {"decision_cycle", "terrain", "params_file", "provider_ids", "topic_remap", "semantic_segmentation",
+    allowed = {"ground_height_file", "decision_cycle", "terrain", "params_file", "provider_ids", "topic_remap", "semantic_segmentation",
                "policy", "scan_projection", "velocity_output_topic", "gait_switching_enabled",
                "gait_output_topic", "global_grid", "run_dir", "http_port", "action_wait_s", "worker_python"}
     if set(config) - allowed:
         raise ValueError("Unknown service config fields: " + str(sorted(set(config) - allowed)))
-    for field in ("policy", "topic_remap", "provider_ids"):
+    for field in ("policy", "topic_remap", "provider_ids", "terrain"):
         if not isinstance(config.get(field, {}), dict):
             raise ValueError(field + " must be a mapping")
     providers = config.get("provider_ids", {})
@@ -123,6 +129,10 @@ def validate(config, base=None):
         if field in config and (not isinstance(config[field], str) or not config[field].strip()):
             raise ValueError(field + " must be a nonempty path")
     base = Path(base or os.environ.get("RBNX_INVOCATION_CWD", ".")).expanduser().resolve()
+    ground_file, ground = load_ground_reference(config, base)
+    config = {**config, "ground_height_file": ground_file,
+              "policy": {**config.get("policy", {}), "camera_expected_ground_z_m": ground},
+              "terrain": {**config.get("terrain", {}), "ground_z_m": ground}}
     if not isinstance(config.get("params_file"), str):
         raise ValueError("params_file must be a path string")
     path = Path(config.get("params_file", "")).expanduser()
@@ -188,6 +198,12 @@ def validate(config, base=None):
     segmentation = validate_segmentation(config.get("semantic_segmentation", {}), base, policy["camera_enabled"])
     if policy["camera_enabled"] and not (policy["camera_geometry_enabled"] or segmentation["enabled"]):
         raise ValueError("Camera mode requires geometry detection or semantic segmentation")
+    if not (isinstance(policy["camera_frame"], str) and policy["camera_frame"].strip()
+            and all(isinstance(policy[key], list) and len(policy[key]) == 3
+                    and not any(isinstance(v, bool) or not isinstance(v, (int, float))
+                                or not math.isfinite(v) for v in policy[key])
+                    for key in ("camera_mount_xyz_m", "camera_mount_rpy_deg"))):
+        raise ValueError("camera_frame and camera_mount_xyz_m/camera_mount_rpy_deg must be set")
     if not 0 <= policy["camera_blind_zone_m"] <= policy["camera_max_range_m"]:
         raise ValueError("camera_blind_zone_m must be nonnegative and within camera_max_range_m")
     if not (-.6 <= policy["camera_expected_ground_z_m"] <= -.05

@@ -80,7 +80,7 @@ flat 中障碍按原有最大代价融合，语义提供偏好，不能清除物
 | `slope_filter_enabled` | false | 共用线性高度阈值总开关 |
 | `lidar_slope_enabled` / `camera_slope_enabled` | true / true | 各路几何过滤开关，受总开关约束 |
 | `slope_angle_deg` | 15 | 线性阈值角度，必须小于 45° |
-| `ground_z_m` | -0.18 | 标定的地面高度，base_link 坐标系 |
+| `ground_z_m` | 无默认值 | 从必填的本机 `ground_height_file` 派生，不在清单中直接填写 |
 | `height_margin_m` | 0.10 | 近距离高度余量 |
 | `max_obstacle_height_m` | 2.5 | 线性下阈值以上保留高度带宽 |
 | `can_climb_stairs` | false | 本体上楼梯能力声明 |
@@ -143,3 +143,9 @@ flat 中障碍按原有最大代价融合，语义提供偏好，不能清除物
 优先级允许只填写需要覆盖的状态/来源，其余使用默认值。保留禁用来源的排名不会启用它，运行时 terrain_status.priorities 只展示启用来源。
 至少开启一种实际感知路径。camera_enabled=true 时几何和语义不能同时关闭。
 全部语义关闭时可执行普通平地导航，但没有自动楼梯识别能力；声明可上楼梯却未配置有效楼梯语义会被拒绝。
+
+## 本机地面配置
+
+必须通过顶层 `ground_height_file` 指定 Git 忽略的本机 JSON 文件。文件中 `ground_z_m` 为有限负数，表示地面在 base_link 下的高度；没有有效值就拒绝初始化，不回退到示例值。`terrain.ground_z_m` 和 `policy.camera_expected_ground_z_m` 在读取后由同一值派生，不允许分别在清单中填写。
+
+复制 `config/ground.local.example.json` 为本机 `config/ground.local.json`，填入该设备的测量值。模板 null 不是可用值。`run/runtime.json` 中会记录实际采用的数值，但运行目录也不纳入 Git。

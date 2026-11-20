@@ -6,6 +6,7 @@ service:
     manifest: package_manifest.jetson-native.yaml
     config:
       params_file: config/outdoor_nav2.yaml
+      ground_height_file: config/ground.local.json # Machine-local, Git-ignored; fill before INIT.
       provider_ids:
         cloud: front_lidar
         localization: localization_outdoor
@@ -37,7 +38,6 @@ service:
         enabled: false # Opt in after binding IMU and semantic sources; docs/TERRAIN.md
         slope_filter_enabled: false
         slope_angle_deg: 15.0
-        ground_z_m: -0.18 # Measure ground z in base_link, not lidar mounting height
         can_climb_stairs: false # Ranger is wheeled
         stairs_classes: [] # Names from semantic_segmentation.classes, e.g. [stairs]
         flat_gait_code: null # Real guarded chassis command/feedback codes
@@ -49,7 +49,6 @@ service:
         camera_geometry_enabled: true
         camera_blind_zone_m: 0.0
         camera_frame_confirmed: false
-        camera_expected_ground_z_m: -0.18
         motion_enabled: false
         # Set calibration/feedback confirmations only after measuring them.
         require_chassis_ready: true

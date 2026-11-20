@@ -2,6 +2,12 @@
 
 此视觉版本位于 `feat/vision-multisensor-navigation` 分支，包含原 RGB-D / RTAB-Map / 可选语义分割 链路及检测后稳定性过滤。现有使用者可继续使用 `main`；采用视觉版本时，在部署 manifest 中显式选择此分支，并按下文安装视觉依赖、配置完整 Nav2 参数。
 
+## 必填本机地面基准
+
+`ground_height_file` 必须指向本机 JSON 文件，内容至少包含 `ground_z_m`（地面在 base_link 下的有限负数）。无默认值，缺失、空值、布尔值、非有限值均拒绝初始化。复制 `config/ground.local.example.json` 后填入实测值，实际文件 `config/ground.local.json` 由 Git 忽略；不要把标定数值写进跟踪的部署清单。
+
+读取后统一派生 `terrain.ground_z_m` 和 `policy.camera_expected_ground_z_m`，不再允许两处独立内联配置。修改本机文件后须重新初始化/重启服务，不会在运动中热换基准。
+
 ## 部署参数约定
 
 完整 Nav2 参数由机器人部署的 `params_file` 拥有，服务只绑定话题占位符并裁剪关闭的传感器层，

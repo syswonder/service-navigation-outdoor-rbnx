@@ -12,3 +12,5 @@ __pycache__/
 
 # Local tests, reports, backups and machine-specific configuration
 /local_only/
+
+/config/ground.local.json

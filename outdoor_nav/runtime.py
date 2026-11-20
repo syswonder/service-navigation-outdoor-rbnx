@@ -51,6 +51,7 @@ class OutdoorExecutor(Executor):
         self.steady = Clock(clock_type=ClockType.STEADY_TIME)
         self.tf = Buffer()
         self.tf_listener = TransformListener(self.tf, self)
+        self.camera_tf = None
         self.tasks = TaskStore(journal=Path(self.runtime["run_dir"]) / "tasks.json")
         self.stats, self.lifecycle, self.lifecycle_pending = {}, {}, set()
         self.clock_value, self.clock_changed = None, 0.0
@@ -89,6 +90,8 @@ class OutdoorExecutor(Executor):
             for n in ("planner_server", "controller_server")
         }
         self.command_pub = self.create_publisher(Twist, "/outdoor/safe_command", 10)
+        if self.config["camera_enabled"]:
+            self.publish_camera_mount()
         self.cycle = None
         self.terrain = None
         self.gait_schedule = self.gait_task = None
@@ -161,6 +164,30 @@ class OutdoorExecutor(Executor):
             and now - self.stationary_since >= self.config["stop_hold_s"]
         ):
             self.startup_stopped = True
+
+    def publish_camera_mount(self):
+        """Publish the static base_link to camera transform the depth driver cannot know."""
+        from geometry_msgs.msg import TransformStamped
+        from tf2_ros import StaticTransformBroadcaster
+
+        roll, pitch, yaw = (math.radians(value) for value in self.config["camera_mount_rpy_deg"])
+        x, y, z = (float(value) for value in self.config["camera_mount_xyz_m"])
+        cr, sr = math.cos(roll / 2), math.sin(roll / 2)
+        cp, sp = math.cos(pitch / 2), math.sin(pitch / 2)
+        cy, sy = math.cos(yaw / 2), math.sin(yaw / 2)
+        transform = TransformStamped()
+        transform.header.stamp = self.get_clock().now().to_msg()
+        transform.header.frame_id = self.base_frame
+        transform.child_frame_id = self.config["camera_frame"]
+        transform.transform.translation.x = x
+        transform.transform.translation.y = y
+        transform.transform.translation.z = z
+        transform.transform.rotation.w = cr * cp * cy + sr * sp * sy
+        transform.transform.rotation.x = sr * cp * cy - cr * sp * sy
+        transform.transform.rotation.y = cr * sp * cy + sr * cp * sy
+        transform.transform.rotation.z = cr * cp * sy - sr * sp * cy
+        self.camera_tf = StaticTransformBroadcaster(self)
+        self.camera_tf.sendTransform(transform)
 
     def gait_tick(self):
         if getattr(self, "cycle", None) is not None:

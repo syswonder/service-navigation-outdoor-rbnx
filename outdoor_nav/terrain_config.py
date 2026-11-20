@@ -5,7 +5,7 @@ import math
 SOURCES = ('lidar_obstacles', 'lidar_semantics', 'visual_obstacles', 'visual_semantics')
 DEFAULTS = dict(
     enabled=False, slope_filter_enabled=False, lidar_slope_enabled=True,
-    camera_slope_enabled=True, slope_angle_deg=15., ground_z_m=-.18,
+    camera_slope_enabled=True, slope_angle_deg=15., ground_z_m=None,
     height_margin_m=.10, max_obstacle_height_m=2.5,
     can_climb_stairs=False, stairs_classes=[], lidar_semantics_enabled=False,
     pitch_flat_deg=4., pitch_hold_deg=8., pitch_sign=1., pitch_offset_deg=0.,
@@ -25,6 +25,9 @@ def validate_terrain(raw, policy, segmentation, gait_enabled):
     if not isinstance(raw, dict) or set(raw) - DEFAULTS.keys():
         raise ValueError('Unknown terrain configuration fields')
     p = {**deepcopy(DEFAULTS), **deepcopy(raw)}
+    ground = p["ground_z_m"]
+    if type(ground) not in (float, int) or not math.isfinite(ground) or ground >= 0:
+        raise ValueError("terrain.ground_z_m must be supplied by the machine-local ground_height_file")
     for key, default in DEFAULTS.items():
         value = p[key]
         if type(default) is bool and type(value) is not bool:

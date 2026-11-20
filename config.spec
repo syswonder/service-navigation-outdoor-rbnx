@@ -2,9 +2,13 @@
 # See docs/CONFIGURATION.md for migration and the effective parameter artifact.
 specVersion: 1
 description: Outdoor reference-route execution with independent lidar and original RGB-D perception.
-required: [params_file]
+required: [params_file, ground_height_file]
 additionalProperties: false
 properties:
+  ground_height_file:
+    type: string
+    x-group: Local calibration
+    description: Required machine-local JSON file containing finite negative ground_z_m in base_link. No default. Keep the file out of Git; one value supplies both terrain and camera ground references.
   params_file:
     type: string
     x-group: Nav2 parameters
@@ -145,10 +149,24 @@ properties:
         type: boolean
         default: false
         description: "Measured depth registration and camera extrinsics confirmation; false does not manufacture free space."
+      camera_frame:
+        type: string
+        default: camera_gemini330_link
+        description: "Depth camera link frame; the driver publishes link-to-optical frames, so only base_link-to-link is published here."
+      camera_mount_xyz_m:
+        type: array
+        items: {type: number}
+        default: [0.0, 0.0, 0.0]
+        description: "Camera link position in base_link, metres; publish a static transform so depth points reach base_link."
+      camera_mount_rpy_deg:
+        type: array
+        items: {type: number}
+        default: [0.0, 0.0, 0.0]
+        description: "Camera link roll/pitch/yaw in base_link, degrees."
       camera_expected_ground_z_m:
         type: number
-        default: -0.18
-        description: "Expected ground height in the original base frame, metres; allowed range -0.6 to -0.05."
+        readOnly: true
+        description: "Derived from ground_height_file; do not configure inline. Expected ground height in base_link for the original camera ground detector."
       camera_ground_tolerance_m:
         type: number
         default: 0.05
@@ -390,7 +408,8 @@ properties:
         default: 15.0
       ground_z_m:
         type: number
-        default: -0.18
+        readOnly: true
+        description: "Derived from mandatory ground_height_file; no fallback and no inline machine value."
       height_margin_m:
         type: number
         default: 0.1

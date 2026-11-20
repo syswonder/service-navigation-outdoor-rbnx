@@ -29,12 +29,15 @@ def vision_nodes(runtime, python, rosargs):
               "/semantic/local_grid": "/outdoor/vision/semantic_grid"}
     args = [v for a, b in remaps.items() for v in ("-r", a+":="+b)]
     depth = dict(allow_outdoor_navigation=True, planning_frame="odom", base_frame="base_link",
-                 geometry_primary=True, depth_backend="rtabmap", alignment_verified=p["camera_frame_confirmed"],
+                 # RTAB-Map ground/obstacle segmentation replies in 0.36-0.82 s here while the
+    # pairing slot accepts at most 0.3 s, so every frame expired; the in-process
+    # geometry path already fits the ground plane (offset -0.42 in base_link).
+    geometry_primary=True, depth_backend="legacy", alignment_verified=p["camera_frame_confirmed"],
                  geometry_expected_ground_z=p["camera_expected_ground_z_m"],
                  geometry_ground_z_tolerance=p["camera_ground_tolerance_m"],
                  max_ground_angle_deg=angle, max_range=p["camera_max_range_m"], min_height=.10, max_age=p["sensor_timeout_s"], pixel_stride=3)
     projection = dict(planning_frame="odom", robot_base_frame="base_link", alignment_verified=p["camera_frame_confirmed"],
-                      slope_envelope=slope, slope_angle_deg=angle, ground_reference_z=terrain.get("ground_z_m", p["camera_expected_ground_z_m"]), forward_range=p["camera_max_range_m"], depth_max=p["camera_max_range_m"]+1., ground_limits_confirmed=True, ground_z_min=p["camera_ground_z_min_m"],
+                      slope_envelope=slope, slope_angle_deg=angle, ground_reference_z=terrain["ground_z_m"], forward_range=p["camera_max_range_m"], depth_max=p["camera_max_range_m"]+1., ground_limits_confirmed=True, ground_z_min=p["camera_ground_z_min_m"],
                       ground_z_max=p["camera_ground_z_max_m"], grid_alignment="planning",
                       origin_x=-6., origin_y=-6., width=240, height=240, resolution=.05,
                       pixel_stride=2, temporal_frames=1, opening=False, closing=False,
@@ -59,7 +62,7 @@ def vision_nodes(runtime, python, rosargs):
         children.append(action)
         if geometry_enabled and kind in ("segmentation", "projection"):
             optional.append(action)
-    if geometry_enabled:
+    if geometry_enabled and depth["depth_backend"] == "rtabmap":
         children.append(Node(package="rtabmap_util", executable="obstacles_detection", name="outdoor_rtabmap_obstacles",
             remappings=[("cloud", "/outdoor/vision/rtabmap/input"), ("ground", "/outdoor/vision/rtabmap/ground"),
                         ("obstacles", "/outdoor/vision/rtabmap/obstacles")], parameters=[{
