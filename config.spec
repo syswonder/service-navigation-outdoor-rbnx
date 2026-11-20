@@ -79,6 +79,9 @@ properties:
       scan:
         type: string
         default: "/outdoor/scan"
+      obstacle_scan:
+        type: string
+        default: "/outdoor/obstacle_scan"
       odom:
         type: string
       localization:
@@ -135,6 +138,11 @@ properties:
         type: boolean
         default: false
         description: "Enable the camera costmap and its health gate. Requires geometry or semantic segmentation."
+      camera_geometry_backend:
+        type: string
+        enum: [legacy, rtabmap]
+        default: legacy
+        description: In-process geometry or RTAB-Map adapter; neither bypasses ground validation.
       camera_geometry_enabled:
         type: boolean
         default: true
@@ -163,6 +171,27 @@ properties:
         items: {type: number}
         default: [0.0, 0.0, 0.0]
         description: "Camera link roll/pitch/yaw in base_link, degrees."
+      cloud_min_height_near_m:
+        type: number
+        default: 0.2
+        description: Minimum point height at zero horizontal distance; grows with range.
+      cloud_min_height_far_m:
+        type: number
+        default: 0.5
+        description: Minimum point height reached at cloud_height_ramp_m and beyond.
+      cloud_height_ramp_m:
+        type: number
+        default: 8.0
+        description: Horizontal distance over which the minimum height rises from near to far.
+      stairs_disable_obstacle_layer:
+        type: boolean
+        default: true
+        description: Withhold obstacle marking and clear existing marks on recorded stair sections; raw scan remains unchanged.
+
+      lidar_height_m:
+        type: number
+        readOnly: true
+        description: Derived as minus ground_height_file.ground_z_m, never a second calibration.
       camera_expected_ground_z_m:
         type: number
         readOnly: true
@@ -203,6 +232,19 @@ properties:
         type: number
         default: 1.0
         description: "Worker and guard maximum sensor feedback age, seconds. Set camera_layer.max_age_s separately in the Nav2 YAML."
+      localization_timeout_s:
+        type: number
+        default: 3.0
+        exclusiveMinimum: 0
+        description: One age budget for localization status, pose and velocity; not the obstacle or command lifetime.
+      pose_timeout_s:
+        type: number
+        deprecated: true
+        description: Migration alias of localization_timeout_s. Conflicting simultaneous values are rejected.
+      gait_prepare_timeout_s:
+        type: number
+        deprecated: true
+        description: Preparation wait inherits navigation_recovery_timeout_s unless explicitly overridden by an old deployment.
       command_timeout_s:
         type: number
         default: 0.5
@@ -302,7 +344,7 @@ properties:
       require_chassis_ready:
         type: boolean
         default: true
-        description: "Require fresh external chassis ready JSON in addition to localization and odometry."
+        description: "Require fresh control/usage-mode feedback and armed gait output for preparation. Actual gait confirmation separately gates velocity."
       calibrated:
         type: boolean
         default: false

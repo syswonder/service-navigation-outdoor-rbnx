@@ -3,8 +3,6 @@
 这条执行链保留测量路线的顺序和拓扑，但不要求车轮沿录制折线行驶。默认关闭，旧执行方式保持不变。
 
 ```yaml
-terrain:
-  enabled: true
 decision_cycle:
   enabled: true
   period_s: 2.0
@@ -49,10 +47,12 @@ localization 的状态中必须包含 `navigation_sample`：schema_version=1、s
 
 只有启用的传感器参与等待。规划快照融合使用最大占据代价，未知不清除障碍、视觉可通行不覆盖雷达障碍。`global_costmap` 使用 odom 滚动窗口，只加载周期快照和膨胀层。`local_costmap` 保留部署原有的实时传感器层，供正在执行的控制任务检查障碍。
 
-正常周期刷新不发零速，也不主动取消当前路径。交接期间每条控制指令仍由实时观测时效和速度看门狗约束。传感器时效为一个 `period_s`，新规划快照也必须在有效期内。遇到超时、数据缺失、控制目标结束或状态机要求停止时，运动输出关闭。连续失败沿用 `policy.planner_patience_s`，反复重规划且没有 odom 位移进展沿用 `policy.controller_patience_s`。底层控制器、速度平滑和停车看门狗维持原频率。
+正常周期刷新不发零速，也不主动取消当前路径。交接期间每条控制指令仍由实时观测时效和速度看门狗约束。原始传感器健康仍受 `sensor_timeout_s` 约束；周期快照不得超过 `period_s`，且不能通过改写时间戳延长有效期。遇到超时、数据缺失、控制目标结束或状态机要求停止时，运动输出关闭。连续失败沿用 `policy.planner_patience_s`，反复重规划且没有 odom 位移进展沿用 `policy.controller_patience_s`。底层控制器、速度平滑和停车看门狗维持原频率。
 
 ## 诊断与测量
 
 状态中的 `decision_cycle` 报告周期编号、提示点、样本数、有效性和失败原因。时间单位均为 ms：controller_release_ms、state_and_hint_ms、fsm_ms、sensor_wait_ms、fusion_ms、costmap_wait_ms、fusion_and_costmap_ms、planning_ms、controller_accept_ms，以及总 compute_ms。
 
 模型推理、原始点云投影和定位估计器在异步生产端运行；sensor_wait_ms 只代表等待新处理结果，不等于这些模块的独立计算时间。必须分别测量，不能将合成 scan/grid 测试称作实传感器全链路通过。测试脚本和设备测量报告保存在被忽略的 local_only/，不纳入 Git。
+
+周期规划不再强制启用 terrain。无论是否开启地形监督，步态准备均通过共用的确认门；真实地形 FSM 仍在每个周期只推进一次。

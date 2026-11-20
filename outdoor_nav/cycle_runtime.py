@@ -24,6 +24,7 @@ class CycleNavigation:
         self.n, self.p = node, node.runtime['decision_cycle']
         self.samples = deque(maxlen=self.p['sample_limit'])
         self.scan = self.camera = None
+        self.scans = deque(maxlen=64)
         self.acks = {}
         self.number, self.valid_until = 0, -math.inf
         self.active_result = None
@@ -33,9 +34,13 @@ class CycleNavigation:
         self.pub = node.create_publisher(OccupancyGrid, t['cycle_costmap'], 1)
         node.create_subscription(String, t['cycle_ack'], self.ack, 10)
         if node.config['lidar_enabled']:
-            node.create_subscription(LaserScan, t['scan'], lambda m:setattr(self,'scan',m), qos_profile_sensor_data)
+            node.create_subscription(LaserScan, t['scan'], self.on_scan, qos_profile_sensor_data)
         if node.config['camera_enabled']:
             node.create_subscription(OccupancyGrid, t['camera_costmap'], self.on_camera, 5)
+
+    def on_scan(self, msg):
+        self.scan = msg
+        self.scans.append(msg)
 
     def on_camera(self, msg):
         # Invalid certificates produce a fresh, entirely unknown grid.
@@ -111,6 +116,7 @@ class CycleNavigation:
                 await n.pause()
             with n.state_lock:
                 n.owner, n.stopping = task, True
+                n.active_follow_requests, n.active_follow_results = requests, results
             item = n.tasks.snapshot(task)
             n.tasks.update(task, state='planning')
             await n.wait_for_ready_pose(task)
@@ -134,6 +140,11 @@ class CycleNavigation:
                 try:
                     requests[:] = [r for r in requests if r not in results or not results[r].done()]
                     results = {r:f for r,f in results.items() if r in requests}
+                    n.active_follow_requests, n.active_follow_results = requests, results
+                    if await n.synchronize_localization(task):
+                        requests.clear()
+                        results.clear()
+                        self.active_result, self.valid_until = None, -math.inf
                     state_started=time.monotonic()
                     ros_now = n.get_clock().now().nanoseconds/1e9
                     samples = [s for s in list(self.samples) if 0 <= ros_now-s['stamp_s'] < self.p['period_s']]
@@ -170,7 +181,8 @@ class CycleNavigation:
                     stage = time.monotonic()
                     if n.terrain is not None:
                         n.terrain.tick()
-                    motion_allowed = n.terrain.result['motion_allowed']
+                    motion_allowed = (n.gait_confirmed(n.tasks.snapshot(task, include_paths=False))
+                                      and (n.terrain is None or n.terrain.result['motion_allowed']))
                     controller_id = n.controller_id()
                     if not motion_allowed or (requests and n.active_controller != controller_id):
                         self.valid_until = -math.inf
@@ -214,14 +226,14 @@ class CycleNavigation:
                         await n.pause(.01)
                     timings['fusion_and_costmap_ms'] = (time.monotonic()-stage)*1000
                     timings['costmap_wait_ms'] = (time.monotonic()-ack_started)*1000
-                    if n.terrain is not None and not n.terrain.result['motion_allowed']:
+                    if not motion_allowed:
                         # Alignment and gait handshakes intentionally make no
                         # translational progress and do not consume this budget.
                         budget.last_progress_s=time.monotonic()
                         controller_attempted=False
                         self.valid_until = min(boundary,time.monotonic()+max(0.,oldest+self.p['period_s']-n.get_clock().now().nanoseconds/1e9))
                         self.report = dict(enabled=True,ready=self.allowed(),cycle=self.number,
-                                           action=n.terrain.result['phase'],timings_ms=timings,
+                                           action=n.terrain.result['phase'] if n.terrain is not None else 'gait_confirmation',timings_ms=timings,
                                            compute_ms=(time.monotonic()-started)*1000)
                         self.history.append(self.report)
                         budget.planned(True,time.monotonic())
@@ -310,6 +322,7 @@ class CycleNavigation:
                 if not released or not stopped:
                     outcome, reason = 'failed', 'Cycle executor could not confirm controller release and stop'
                     n.stop_failure = reason
+                    n.stop_recovery = (requests, results)
                 self.report.update(task_outcome=outcome,reason=reason)
                 n.tasks.update(task,state=outcome,reason=reason,completion_pose=n.pose())
                 n.owner = None
@@ -324,14 +337,21 @@ class CycleNavigation:
     def grid(self, position, now):
         n, lidar, camera, stamps = self.n, None, None, []
         if n.config['lidar_enabled']:
-            scan = self.scan
-            if scan is None:raise ValueError('Waiting for lidar snapshot')
+            scan, tf = None, None
+            for candidate in reversed(list(self.scans)):
+                stamp = candidate.header.stamp.sec+candidate.header.stamp.nanosec/1e9
+                if not 0 <= now-stamp < self.p['period_s']:
+                    continue
+                try:
+                    tf = n.tf.lookup_transform('odom', candidate.header.frame_id,
+                                               Time.from_msg(candidate.header.stamp))
+                except TransformException:
+                    continue
+                scan = candidate
+                break
+            if scan is None:
+                raise ValueError('Waiting for a fresh lidar snapshot with acquisition-time TF')
             stamp = scan.header.stamp.sec+scan.header.stamp.nanosec/1e9
-            try:
-                tf = n.tf.lookup_transform('odom',scan.header.frame_id,Time.from_msg(scan.header.stamp),
-                                           timeout=Duration(seconds=.05))
-            except TransformException as exc:
-                raise ValueError('Waiting for acquisition-time lidar TF: '+str(exc)) from exc
             q,t = tf.transform.rotation,tf.transform.translation
             yaw = math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z))
             rays=[(yaw+scan.angle_min+i*scan.angle_increment,float(r)) for i,r in enumerate(scan.ranges)

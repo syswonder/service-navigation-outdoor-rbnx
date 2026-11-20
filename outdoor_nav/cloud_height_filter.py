@@ -13,6 +13,7 @@ from tf2_ros import Buffer, TransformListener
 from .configuration import load_runtime
 from .terrain_inputs import TerrainInputs, rotation
 from .core.terrain_geometry import height_keep, suppress_stair_points
+from .core.height_filter import body_band, filter_xyz
 
 
 def apply(points, transform):
@@ -24,6 +25,7 @@ class CloudHeightFilter(Node):
     def __init__(self, runtime):
         super().__init__('outdoor_cloud_height_filter')
         self.p, self.projection = runtime['terrain'], runtime['scan_projection']
+        self.policy = runtime['policy']
         self.tf = Buffer()
         self.listener = TransformListener(self.tf, self)
         self.inputs = TerrainInputs(self, runtime) if self.p['enabled'] else None
@@ -45,8 +47,16 @@ class CloudHeightFilter(Node):
                 points = apply(points, tf)
             if self.p['slope_filter_enabled'] and self.p['lidar_slope_enabled']:
                 keep = height_keep(points, self.p)
+            elif self.projection.get('fixed_height', False):
+                keep = (np.isfinite(points).all(axis=1)
+                        & (points[:, 2] >= self.projection['min_height_m'])
+                        & (points[:, 2] <= self.projection['max_height_m']))
             else:
-                keep = np.isfinite(points).all(axis=1) & (points[:, 2] >= self.projection['min_height_m']) & (points[:, 2] <= self.projection['max_height_m'])
+                p = self.policy
+                ceiling = max(p['cloud_max_height_m'], p['cloud_min_height_far_m'] + .2)
+                near, far, ceiling = body_band(p['cloud_min_height_near_m'],
+                    p['cloud_min_height_far_m'], ceiling, -self.p['ground_z_m'])
+                keep = filter_xyz(*points.T, near, far, p['cloud_height_ramp_m'], ceiling)
             points = points[keep]
             if self.inputs and len(points):
                 obs, state = self.inputs.suppression_context()

@@ -46,11 +46,14 @@ class Watchdog(Node):
         self.create_timer(1.0, self.check_owners)
 
     def check_owners(self):
-        if self.count_publishers(self.pub.topic_name) > 1:
-            self.conflict = True
-            self.get_logger().error(
-                "Another command output publisher detected; restart after removing it"
-            )
+        conflict = self.count_publishers(self.pub.topic_name) > 1
+        if conflict != self.conflict:
+            # Removing a competing publisher restores readiness, not an old
+            # command: the active task must have survived and send fresh output.
+            self.command, self.command_at = Twist(), 0.0
+            if conflict:
+                self.get_logger().error("Another command output publisher detected; stopping")
+        self.conflict = conflict
 
     def receive(self, msg):
         self.command, self.command_at = msg, time.monotonic()
@@ -82,7 +85,7 @@ class Watchdog(Node):
             "diagnostic_mode": not self.diagnostic,
             "motion_disabled": self.config["motion_enabled"],
             "localization_unready": self.ready,
-            "localization_stale": now - self.geo_at < self.config["sensor_timeout_s"],
+            "localization_stale": now - self.geo_at < self.config.get("localization_timeout_s", 3.0),
             "scan_stale": not self.config.get("lidar_enabled", True) or now - self.scan_at < self.config["sensor_timeout_s"],
             "camera_stale": not self.config.get("camera_enabled", False) or now-getattr(self, "camera_at", 0) < self.config["sensor_timeout_s"],
             "command_stale": now - self.command_at < self.config["command_timeout_s"],

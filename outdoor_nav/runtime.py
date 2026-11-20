@@ -1,6 +1,7 @@
 """ROS execution worker. Sensors/localization are external providers."""
 
 import argparse
+import base64
 import json
 import math
 from pathlib import Path
@@ -19,20 +20,23 @@ from rclpy.action import ActionClient, ActionServer, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.clock import Clock, ClockType
 from rclpy.executors import MultiThreadedExecutor
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import QoSProfile, qos_profile_sensor_data
 from rclpy.parameter import Parameter
 from rclpy.signals import SignalHandlerOptions
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import LaserScan, PointCloud2
 from std_msgs.msg import String, UInt32
 from tf2_ros import Buffer, TransformListener
 
 from .configuration import load_runtime
 from .core.scan_health import healthy_scan
-from .core.gait import GaitSchedule, STAIRS
+from .core.gait import GaitSchedule, STAIRS, chassis_prepared
+from .core.scan_gate import stairs_obstacle_off
+from std_srvs.srv import Empty
 from .core.tasks import TaskStore, TERMINAL
 from .executor import Executor, LATCHED
 from .http import serve, ApiError
 from .requests import submit
+from .localization_policy import continuation_allowed, arrival_confirmed, correction_pending
 
 
 class OutdoorExecutor(Executor):
@@ -50,7 +54,11 @@ class OutdoorExecutor(Executor):
         self.group = ReentrantCallbackGroup()
         self.steady = Clock(clock_type=ClockType.STEADY_TIME)
         self.tf = Buffer()
-        self.tf_listener = TransformListener(self.tf, self)
+        # Pose readiness needs current transforms; a long queue can keep this
+        # listener seconds behind the broadcaster under concurrent callbacks.
+        self.tf_node = Node("outdoor_execution_tf")
+        self.tf_listener = TransformListener(
+            self.tf, self.tf_node, spin_thread=True, qos=QoSProfile(depth=1))
         self.camera_tf = None
         self.tasks = TaskStore(journal=Path(self.runtime["run_dir"]) / "tasks.json")
         self.stats, self.lifecycle, self.lifecycle_pending = {}, {}, set()
@@ -59,9 +67,12 @@ class OutdoorExecutor(Executor):
         self.global_map = self.local_map = None
         self.costmap_view_cache = {}
         self.raw_command, self.raw_received = Twist(), 0.0
+        self.cloud_preview, self.cloud_preview_at = None, -math.inf
         self.velocity, self.velocity_at = (math.inf, math.inf), 0.0
         self.owner, self.stopping = None, True
         self.stop_failure = None
+        self.stop_recovery = None
+        self.stop_recovering = False
         self.handles, self.requests, self.cancel_sent = {}, {}, set()
         self.state_lock = threading.RLock()
         self.geo, self.geo_at = {}, -math.inf
@@ -94,6 +105,18 @@ class OutdoorExecutor(Executor):
             self.publish_camera_mount()
         self.cycle = None
         self.terrain = None
+        self.scan, self.scan_at = None, -math.inf
+        self.obstacles_off = False
+        self.obstacle_scan_pub = self.create_publisher(
+            LaserScan, "/outdoor/obstacle_scan", qos_profile_sensor_data
+        )
+        self.clear_costmaps = [
+            self.create_client(Empty, name)
+            for name in (
+                "/global_costmap/clear_entirely_global_costmap",
+                "/local_costmap/clear_entirely_local_costmap",
+            )
+        ]
         self.gait_schedule = self.gait_task = None
         self.gait_pub = (self.create_publisher(UInt32, self.runtime["gait_output_topic"], 10)
                          if self.runtime.get("gait_switching_enabled", False) else None)
@@ -116,6 +139,8 @@ class OutdoorExecutor(Executor):
             (String, "/outdoor/chassis_status", self.on_chassis, 10),
             (LaserScan, "/outdoor/scan", self.on_scan, qos_profile_sensor_data),
             (LaserScan, "/outdoor/camera_scan", self.on_camera_scan, qos_profile_sensor_data),
+            (PointCloud2, "/outdoor/cloud_for_scan", self.on_cloud_preview,
+             qos_profile_sensor_data),
         ):
             self.create_subscription(kind, name, callback, qos)
         self.server = ActionServer(
@@ -132,8 +157,10 @@ class OutdoorExecutor(Executor):
             (0.05, self.safety_tick),
             (0.1, self.dispatch),
             (1.0, self.poll_lifecycle),
+            (1.0, self.recover_stop),
             (0.1, self.check_stationary),
             (0.1, self.gait_tick),
+            (0.1, self.scan_gate_tick),
         ):
             self.create_timer(
                 interval, callback, clock=self.steady, callback_group=self.group
@@ -150,7 +177,7 @@ class OutdoorExecutor(Executor):
     def check_stationary(self):
         now = time.monotonic()
         stopped = (
-            now - self.velocity_at < self.config["sensor_timeout_s"]
+            now - self.velocity_at < self.config.get("localization_timeout_s", 3.0)
             and self.velocity[0] <= self.config["stopped_linear_mps"]
             and self.velocity[1] <= self.config["stopped_angular_rps"]
         )
@@ -189,24 +216,74 @@ class OutdoorExecutor(Executor):
         self.camera_tf = StaticTransformBroadcaster(self)
         self.camera_tf.sendTransform(transform)
 
-    def gait_tick(self):
-        if getattr(self, "cycle", None) is not None:
-            return  # Exactly one FSM step is owned by each decision cycle.
+    async def recover_stop(self):
+        # Recover readiness only; the failed task remains failed.
+        if (not self.stop_failure or self.stop_recovery is None or self.owner is not None
+                or self.stop_recovering or self.clock_rewound):
+            return
+        self.stop_recovering = True
+        try:
+            requests, results = self.stop_recovery
+            if await self.release_controller(requests, results) and await self.confirm_stop():
+                self.stop_failure = None
+                self.stop_recovery = None
+                self.startup_stopped = True
+        finally:
+            self.stop_recovering = False
+
+    def on_cloud_preview(self, msg):
+        """Cache a downsampled lidar cloud for the read-only 3D page view."""
+        from .core.cloud_view import parse_xyz, voxel_downsample
+
+        try:
+            xyz = parse_xyz(msg)
+        except ValueError:
+            return
+        points = voxel_downsample(xyz, 0.06, 6000)
+        stamp = msg.header.stamp
+        payload = {
+            "ok": True,
+            "frame_id": msg.header.frame_id or "base_link",
+            "count": int(len(points)),
+            "stamp_s": float(stamp.sec) + float(stamp.nanosec) * 1e-9,
+            "points_b64": base64.b64encode(
+                points.astype("<f4").tobytes()).decode(),
+        }
         with self.state_lock:
-            if getattr(self, "terrain", None) is not None:
-                self.terrain.tick()
-                return
+            self.cloud_preview, self.cloud_preview_at = payload, time.monotonic()
+
+    def cloud_snapshot(self):
+        from .http import ApiError
+
+        with self.state_lock:
+            payload, age = self.cloud_preview, time.monotonic() - self.cloud_preview_at
+        if payload is None:
+            raise ApiError(503, "Waiting for the lidar cloud")
+        if age > 3.0:
+            raise ApiError(503, "Lidar cloud is stale")
+        return payload
+
+    def gait_tick(self):
+        with self.state_lock:
+            terrain = getattr(self, "terrain", None)
+            if terrain is not None:
+                if getattr(self, "cycle", None) is None:
+                    terrain.tick()
+                # When stair semantics control gait, the terrain FSM is the sole
+                # owner. Flat-only terrain still needs the normal startup handshake.
+                if terrain.inputs.p['can_climb_stairs']:
+                    return
             task = self.tasks.snapshot(self.owner) if self.owner else None
             if (self.gait_pub is None or not task or task["cancel_requested"]
-                    or task["state"] not in ("planning", "navigating", "replanning")
-                    or not task.get("intervals")):
+                    or task["state"] not in ("planning", "navigating", "replanning")):
                 self.gait_schedule = self.gait_task = None
                 return
             if self.gait_task != task["task_id"]:
-                self.gait_schedule = GaitSchedule(task["reference_path"], task["intervals"])
+                self.gait_schedule = GaitSchedule(task["reference_path"], task["intervals"],
+                                                  flat_only=terrain is not None or not task["intervals"])
                 self.gait_task = task["task_id"]
             position = self.pose()
-            if position is None or not 0 <= position["age_s"] < self.config["sensor_timeout_s"]:
+            if position is None or not 0 <= position["age_s"] < self.config.get("pose_timeout_s", 3.0):
                 return
             now, body = time.monotonic(), self.chassis
             motion_age = body.get("motion_feedback_age_s")
@@ -216,15 +293,21 @@ class OutdoorExecutor(Executor):
             received_age = now - self.chassis_at
             health = self.status(False)["health"]
             eligible = (all(v for k, v in health.items() if k != "chassis")
-                        and received_age < 1. and body.get("state") == 17
-                        and body.get("usage_mode") == 1 and 0 <= mode_age < 3.
-                        and 0 <= motion_age < 1. and body.get("gait_output_enabled") is True)
+                        and chassis_prepared(body, received_age))
+            # The stairs gait does not honour pure rotation, so rotations on a
+            # stairs section temporarily switch the gait to flat (see
+            # GaitSchedule.tick); detect them from the fresh controller output.
+            raw = self.raw_command
+            rotating = (0 <= now - self.raw_received < self.config.get("command_timeout_s", 0.5)
+                        and abs(raw.linear.x) < 0.02 and abs(raw.angular.z) > 0.02)
             command, status = self.gait_schedule.tick(
                 position, now, body.get("gait"), max(motion_age, received_age), eligible,
                 stopped=(self.stationary_since is not None
                          and now-self.stationary_since >= self.config["stop_hold_s"]
-                         and now-self.velocity_at < self.config["sensor_timeout_s"]),
-                timeout_s=self.config["gait_switch_timeout_s"])
+                         and now-self.velocity_at < self.config.get("localization_timeout_s", 3.0)),
+                timeout_s=self.config["gait_switch_timeout_s"],
+                prepare_timeout_s=self.config.get("gait_prepare_timeout_s", 15.),
+                rotating=rotating)
             if command is not None:
                 self.gait_pub.publish(UInt32(data=command))
             self.tasks.update(task["task_id"], gait_status=status)
@@ -232,6 +315,10 @@ class OutdoorExecutor(Executor):
                 self.command_pub.publish(Twist())
 
     def safety_tick(self):
+        if correction_pending(self.geo, getattr(self, "handled_recovery", 0),
+                              getattr(self, "handled_epoch", None)):
+            self.command_pub.publish(Twist())
+            return
         if getattr(self, "cycle", None) is not None and not self.cycle.allowed():
             self.command_pub.publish(Twist())
             return
@@ -243,7 +330,9 @@ class OutdoorExecutor(Executor):
                          and task["state"] in ("planning", "navigating", "replanning")
                          and self.status(False)["ready"])
             aligning = self.terrain.result["phase"] == "align"
-            safe = ready and (aligning or (not self.stopping and
+            gait_ok = (self.terrain.inputs.p['can_climb_stairs']
+                       or self.gait_confirmed(task))
+            safe = ready and gait_ok and (aligning or (not self.stopping and
                 time.monotonic()-self.raw_received < self.config["command_timeout_s"]))
             self.command_pub.publish(self.terrain.command(safe, self.raw_command))
 
@@ -253,28 +342,58 @@ class OutdoorExecutor(Executor):
             return "StairsFollowPath" if r["state"] == "stairs_up" and r["phase"] == "climb" else "FollowPath"
         return "StairsFollowPath" if self.gait_schedule and self.gait_schedule.target == STAIRS else "FollowPath"
 
+    def gait_confirmed(self, task):
+        if not self.runtime.get("gait_switching_enabled", False):
+            return True
+        if getattr(self, "terrain", None) is not None and self.terrain.inputs.p['can_climb_stairs']:
+            return self.terrain.result['motion_allowed']
+        if not task:
+            return False
+        state = task.get("gait_status") or {}
+        return (state.get("motion_allowed") is True
+                and chassis_prepared(self.chassis, time.monotonic()-self.chassis_at)
+                and self.chassis.get("gait") == state.get("target_code"))
+
     def motion_allowed(self, task):
+        if not self.gait_confirmed(task):
+            return False
         if getattr(self, "terrain", None) is not None:
             return self.terrain.result["motion_allowed"]
-        if not task or not task.get("intervals"):
-            return True
-        state = task.get("gait_status") or {}
-        now = time.monotonic()
-        age = self.chassis.get("motion_feedback_age_s")
-        return (state.get("motion_allowed") is True
-                and now-self.chassis_at < 1.
-                and type(age) in (float, int) and 0 <= age < 1.
-                and self.chassis.get("gait") == state.get("target_code")
-                and getattr(self, "active_controller", None) == self.controller_id())
+        return (not self.runtime.get("gait_switching_enabled", False)
+                or getattr(self, "active_controller", None) == self.controller_id())
+
+    async def synchronize_localization(self, task_id):
+        recovery = (self.geo.get("fusion") or {}).get("recovery_id", 0)
+        epoch = (self.geo.get("navigation_sample") or {}).get("epoch")
+        changed = correction_pending(self.geo, getattr(self, "handled_recovery", 0),
+                                     getattr(self, "handled_epoch", None))
+        if changed:
+            self.stopping = True
+            self.command_pub.publish(Twist())
+            requests = getattr(self, "active_follow_requests", [])
+            results = getattr(self, "active_follow_results", {})
+            if not await self.release_controller(requests, results) or not await self.confirm_stop():
+                raise RuntimeError("Cannot release controller after localization correction")
+            self.handled_recovery = recovery
+            self.tasks.update(task_id, state="replanning", reason="Localization corrected/reset; replanning")
+        if epoch is not None:
+            self.handled_epoch = epoch
+        return changed
 
     async def wait_for_ready_pose(self, task_id):
-        if getattr(self, "terrain", None) is not None:
-            if self.terrain.result["failed"]:
-                raise RuntimeError("Terrain supervisor stopped: " + self.terrain.result["reason"])
-            return await super().wait_for_ready_pose(task_id)
+        await self.synchronize_localization(task_id)
         was_stopping = self.stopping
         while True:
             position = await super().wait_for_ready_pose(task_id)
+            # Data can recover while the coroutine is waiting. Never return a
+            # new-epoch pose to an old controller path without releasing it.
+            if await self.synchronize_localization(task_id):
+                was_stopping = True
+                continue
+            if getattr(self, "terrain", None) is not None:
+                if self.terrain.result["failed"]:
+                    raise RuntimeError("Terrain supervisor stopped: " + self.terrain.result["reason"])
+                return position
             self.gait_tick()
             task = self.tasks.snapshot(task_id, include_paths=False)
             gait = task.get("gait_status") or {}
@@ -296,6 +415,10 @@ class OutdoorExecutor(Executor):
         self._state(msg, "geo")
         if self.cycle is not None:
             self.cycle.sample(self.geo)
+        if self.owner and correction_pending(self.geo, getattr(self, "handled_recovery", 0),
+                                             getattr(self, "handled_epoch", None)):
+            self.stopping = True
+            self.command_pub.publish(Twist())
 
     def on_guard(self, msg):
         self._state(msg, "guard")
@@ -314,6 +437,7 @@ class OutdoorExecutor(Executor):
             setattr(self, name, {})
 
     def on_scan(self, msg):
+        self.scan, self.scan_at = msg, time.monotonic()
         if healthy_scan(
             msg,
             self.get_clock().now().nanoseconds / 1e9,
@@ -328,6 +452,35 @@ class OutdoorExecutor(Executor):
         if healthy_scan(msg, self.get_clock().now().nanoseconds / 1e9,
                         self.config["sensor_timeout_s"], allow_filtered_empty=True):
             self.mark("camera")
+    def stairs_active(self):
+        task = self.tasks.snapshot(self.owner, include_paths=False) if self.owner else None
+        return stairs_obstacle_off(
+            (task or {}).get("gait_status"),
+            self.config["stairs_disable_obstacle_layer"],
+        )
+
+    def scan_gate_tick(self):
+        """Stop marking lidar returns as obstacles while the stair gait runs.
+
+        The sensor topic stays the real scan for the guard and any observer;
+        only the obstacle layer's copy is withheld. Existing marks are cleared
+        through Nav2's own service instead of publishing a fabricated scan.
+        """
+        scan = self.scan
+        if scan is None:
+            return
+        stairs = self.stairs_active()
+        if stairs != self.obstacles_off:
+            self.obstacles_off = stairs
+            if stairs:
+                for client in self.clear_costmaps:
+                    if client.service_is_ready():
+                        client.call_async(Empty.Request())
+        if stairs:
+            return
+        if time.monotonic() - self.scan_at >= self.config["sensor_timeout_s"]:
+            return
+        self.obstacle_scan_pub.publish(scan)
 
     def status(self, include_task=True):
         now = time.monotonic()
@@ -337,7 +490,6 @@ class OutdoorExecutor(Executor):
         owned = (
             self.tasks.snapshot(self.owner, include_paths=False) if self.owner else None
         )
-        required = owned.get("localization_grade") if owned else None
         health = {
             k: now - self.stats.get(k, -math.inf) < limit
             for k, limit in (("lidar", t), ("global_map", 3), ("local_map", t))
@@ -345,13 +497,8 @@ class OutdoorExecutor(Executor):
         health["lidar"] = not c.get("lidar_enabled", True) or health["lidar"]
         health["camera"] = not c.get("camera_enabled", False) or now-self.stats.get("camera", -math.inf) < t
         health.update(
-            localization=bool(g.get("ready"))
-            and now - self.geo_at < t
-            and (
-                required != "fixed"
-                or g.get("grade") == "fixed"
-                or (g.get("grade") == "float" and c["allow_float_during_fixed_task"])
-            ),
+            localization=continuation_allowed(g, owned, c["allow_float_during_fixed_task"])
+            and now-self.geo_at < c.get('localization_timeout_s', 3.0),
             heading=bool(g.get("heading", {}).get("ready"))
             if c["heading_source"] == "wit_imu"
             else True,
@@ -366,7 +513,9 @@ class OutdoorExecutor(Executor):
               and (not c.get("camera_enabled", False) or c["camera_frame_confirmed"]),
             motion_enabled=c["motion_enabled"],
             chassis=not c["require_chassis_ready"]
-            or (self.chassis.get("ready") is True and now - self.chassis_at < t),
+            or (chassis_prepared(self.chassis, now-self.chassis_at)
+                if self.runtime.get('gait_switching_enabled', False)
+                else self.chassis.get('ready') is True and now-self.chassis_at < t),
             production_mode=True,
             sensor_extrinsics=bool(g.get("extrinsics", {}).get("ready")),
             service_active=self.service_active,
@@ -376,7 +525,7 @@ class OutdoorExecutor(Executor):
                 if c["localization_mode"] == "rtk_imu"
                 else c["odometry_confirmed"]
             )
-            and now - self.velocity_at < t,
+            and now - self.velocity_at < c.get("localization_timeout_s", 3.0),
             actions=self.path_client.server_is_ready()
             and self.follow_client.server_is_ready(),
             exclusive_owners=not g.get("ownership_conflict", False)
@@ -388,16 +537,21 @@ class OutdoorExecutor(Executor):
             value, stamp = self.lifecycle.get(name, (False, 0.0))
             health[name] = value and now - stamp < 5
         pose = self.pose()
-        health["tf"] = pose is not None and pose["age_s"] < t
+        health["tf"] = pose is not None and pose["age_s"] < c.get("pose_timeout_s", 3.0)
         return {
             "decision_cycle": {**self.cycle.report,"ready":bool(self.cycle.report.get('ready') and self.cycle.allowed())} if self.cycle is not None else None,
             "schema_version": 1,
             "ready": all(health.values()),
             "health": health,
             "localization_grade": g.get("grade"),
+            "localization_data_fresh": now-self.geo_at < c.get('localization_timeout_s', 3.0),
+            "fusion": g.get("fusion"),
+            "imu_stream": g.get("imu_stream") if now-self.geo_at < c.get('localization_timeout_s', 3.0) else None,
+            "new_task_ready": g.get("grade") in ("fixed", "float") and all(health.values()),
             "coordinate_reference": g.get("coordinate_reference"),
             "terrain_status": self.terrain.result if self.terrain is not None else None,
             "gait_status": owned.get("gait_status") if owned else None,
+            "obstacles_from_lidar": not self.stairs_active(),
             "gait_switching_enabled": self.runtime.get("gait_switching_enabled", False),
             "local_avoidance_enabled": not self.owner or self.controller_id() == "FollowPath",
             "heading": g.get("heading"),
@@ -408,7 +562,7 @@ class OutdoorExecutor(Executor):
             "measured_velocity": list(self.velocity)
             if all(math.isfinite(v) for v in self.velocity)
             else None,
-            "velocity_fresh": now - self.velocity_at < t,
+            "velocity_fresh": now - self.velocity_at < c.get("localization_timeout_s", 3.0),
             "task": self.tasks.snapshot() if include_task else None,
         }
 
@@ -435,6 +589,7 @@ class OutdoorExecutor(Executor):
             and s["goal"]["x"] == p.x
             and s["goal"]["y"] == p.y
             and self.status(False)["ready"]
+            and self.geo.get("grade") in ("fixed", "float")
             else GoalResponse.REJECT
         )
 
@@ -451,6 +606,18 @@ class OutdoorExecutor(Executor):
         if self.cycle is not None:
             return await self.cycle.execute(handle)
         return await super().execute(handle)
+
+    async def wait_for_arrival_confirmation(self, task_id):
+        deadline = time.monotonic()+self.config["navigation_recovery_timeout_s"]
+        while not arrival_confirmed(self.geo):
+            if self.interrupted(task_id):
+                raise InterruptedError("Canceled while waiting for RTK at destination")
+            self.stopping = True
+            self.command_pub.publish(Twist())
+            self.tasks.update(task_id, state="planning", reason="Waiting for RTK to confirm arrival")
+            if time.monotonic() >= deadline:
+                raise RuntimeError("RTK did not recover to confirm arrival; stopped")
+            await self.pause(.1)
 
     def arrival_heading_ok(self, position, goal):
         return (
@@ -490,7 +657,11 @@ class OutdoorExecutor(Executor):
         else:
             path = self.stairs_path(guidance, window, position)
         goal = self.tasks.snapshot(task_id)["goal"]
-        if path and path.poses and window[-1] == len(guidance.points)-1 and "yaw" in goal:
+        endpoint = path.poses[-1].pose.position if path and path.poses else None
+        reaches_final = (endpoint is not None and math.hypot(
+            endpoint.x-guidance.points[-1]['x'], endpoint.y-guidance.points[-1]['y'])
+            <= self.config.get('planner_tolerance_m', .2)+.01)
+        if reaches_final and "yaw" in goal:
             q = path.poses[-1].pose.orientation
             q.z, q.w = math.sin(goal["yaw"]/2), math.cos(goal["yaw"]/2)
         return path
@@ -538,6 +709,9 @@ def main():
             executor.spin_once(timeout_sec=0.1)
     finally:
         executor.shutdown(timeout_sec=20)
+        node.tf_listener.executor.shutdown()
+        node.tf_listener.dedicated_listener_thread.join()
+        node.tf_node.destroy_node()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

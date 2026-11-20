@@ -53,6 +53,9 @@ def projection_config(config, policy):
             and 0 <= result["range_min_m"] < result["range_max_m"]
             and result["transform_tolerance_s"] >= 0):
         raise ValueError("Invalid scan_projection bounds")
+    # Explicit body-frame bounds retain the vision branch's fixed-band behavior.
+    # Otherwise use main's ground-relative graded envelope, without a new switch.
+    result["fixed_height"] = bool({"min_height_m", "max_height_m"} & raw.keys())
     return result
 
 
@@ -129,7 +132,7 @@ def prepare(config, topics, policy):
     except KeyError as exc:
         raise ValueError(f"Incomplete Nav2 configuration: missing {exc}") from None
     replacements = {"__ROBONIX_ODOM_TOPIC__": topics["odom"],
-                    "__ROBONIX_SCAN_TOPIC__": topics["scan"],
+                    "__ROBONIX_SCAN_TOPIC__": topics["obstacle_scan"],
                     "__ROBONIX_SCAN_CLOUD_TOPIC__": topics["cloud"],
                     "__ROBONIX_CAMERA_COSTMAP_TOPIC__": topics["camera_costmap"]}
 
@@ -221,7 +224,7 @@ def prepare(config, topics, policy):
                         number(block.get("max_age_s"), "camera_layer.max_age_s", .000001)
                     else:
                         sources = block.get("observation_sources", "").split()
-                        if not sources or any(block.get(s, {}).get("topic") != topics["scan"] for s in sources):
+                        if not sources or any(block.get(s, {}).get("topic") != topics["obstacle_scan"] for s in sources):
                             raise ValueError("lidar_layer sources must bind the independent lidar scan")
                 elif layer in layers:
                     layers.remove(layer)

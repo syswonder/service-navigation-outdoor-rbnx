@@ -13,6 +13,7 @@ DEFAULTS = {
     "lidar_enabled": True,
     "camera_enabled": False,
     "camera_geometry_enabled": True,
+    "camera_geometry_backend": "legacy",
     "camera_blind_zone_m": 0.0,
     "camera_max_range_m": 4.0,
     "camera_frame_confirmed": False,
@@ -31,6 +32,8 @@ DEFAULTS = {
     "camera_static_cell_m": 0.15,
     "camera_static_drift_m": 0.12,
     "sensor_timeout_s": 1.0,
+    "pose_timeout_s": 3.0,
+    "localization_timeout_s": 3.0,
     "command_timeout_s": 0.5,
     "navigation_recovery_timeout_s": 15.0,
     "fixed_arrival_m": 3.0,
@@ -39,15 +42,21 @@ DEFAULTS = {
     "max_angular_speed_rps": 0.4,
     "footprint_radius_m": 0.6,
     "cloud_min_height_m": -0.3,
-    "cloud_max_height_m": 0.3,
+    "cloud_max_height_m": 0.7,
+    "cloud_min_height_near_m": 0.2,
+    "cloud_min_height_far_m": 0.5,
+    "cloud_height_ramp_m": 8.0,
+    "lidar_height_m": None,
+    "stairs_disable_obstacle_layer": True,
     "scan_range_min_m": 0.5,
     "planner_patience_s": 60.0,
     "controller_patience_s": 60.0,
-    "stopped_linear_mps": 0.03,
-    "stopped_angular_rps": 0.03,
+    "stopped_linear_mps": 0.10,
+    "stopped_angular_rps": 0.06,
     "stop_hold_s": 1.0,
-    "gait_switch_timeout_s": 10.0,
-    "transform_tolerance_s": 0.2,
+    "gait_switch_timeout_s": 5.0,
+    "gait_prepare_timeout_s": 15.0,
+    "transform_tolerance_s": 3.0,
     "inflation_padding_m": 0.1,
     "inflation_cost_scaling": 5.0,
     "planner_tolerance_m": 0.2,
@@ -90,6 +99,7 @@ TOPICS = {
     "camera_scan": "/outdoor/camera_scan",
     "cloud": "/airy_201/points",
     "scan": "/outdoor/scan",
+    "obstacle_scan": "/outdoor/obstacle_scan",
     "odom": "/outdoor/odom",
     "localization": "/outdoor/localization",
     "chassis": "/outdoor/chassis_status",
@@ -131,7 +141,8 @@ def validate(config, base=None):
     base = Path(base or os.environ.get("RBNX_INVOCATION_CWD", ".")).expanduser().resolve()
     ground_file, ground = load_ground_reference(config, base)
     config = {**config, "ground_height_file": ground_file,
-              "policy": {**config.get("policy", {}), "camera_expected_ground_z_m": ground},
+              "policy": {**config.get("policy", {}), "camera_expected_ground_z_m": ground,
+                         "lidar_height_m": -ground},
               "terrain": {**config.get("terrain", {}), "ground_z_m": ground}}
     if not isinstance(config.get("params_file"), str):
         raise ValueError("params_file must be a path string")
@@ -144,8 +155,17 @@ def validate(config, base=None):
     from .cycle_config import validate_cycle
     cycle = validate_cycle(config.get("decision_cycle", {}))
     policy = {**DEFAULTS, **config.get("policy", {})}
-    if cycle["enabled"]:
-        policy["sensor_timeout_s"] = cycle["period_s"]
+    # One localization age budget feeds pose, status and velocity consumers.
+    # Accept the old alias only when it does not create two conflicting limits.
+    configured = config.get("policy", {})
+    if "pose_timeout_s" in configured:
+        if ("localization_timeout_s" in configured
+                and configured["pose_timeout_s"] != configured["localization_timeout_s"]):
+            raise ValueError("Use one localization_timeout_s for pose and localization")
+        policy["localization_timeout_s"] = configured["pose_timeout_s"]
+    policy["pose_timeout_s"] = policy["localization_timeout_s"]
+    policy["gait_prepare_timeout_s"] = configured.get(
+        "gait_prepare_timeout_s", policy["navigation_recovery_timeout_s"])
     if set(policy) - DEFAULTS.keys():
         raise ValueError(
             "Unknown policy keys: " + str(sorted(set(policy) - DEFAULTS.keys()))
@@ -164,12 +184,15 @@ def validate(config, base=None):
                 raise ValueError(key + " must be finite")
     for key in (
         "sensor_timeout_s",
+        "pose_timeout_s",
+        "localization_timeout_s",
         "command_timeout_s",
         "navigation_recovery_timeout_s",
         "fixed_arrival_m",
         "float_arrival_m",
         "stop_hold_s",
         "gait_switch_timeout_s",
+        "gait_prepare_timeout_s",
         "footprint_radius_m",
         "stopped_linear_mps",
         "stopped_angular_rps",
@@ -181,6 +204,10 @@ def validate(config, base=None):
         0 < policy["max_speed_mps"] <= 0.4
         and 0 < policy["max_angular_speed_rps"] <= 0.4
         and policy["cloud_min_height_m"] < policy["cloud_max_height_m"]
+        and 0 <= policy["cloud_min_height_near_m"] <= policy["cloud_min_height_far_m"]
+        and policy["cloud_height_ramp_m"] > 0
+        and policy["cloud_max_height_m"] > policy["cloud_min_height_near_m"]
+        and 0 < policy["lidar_height_m"] <= 2
         and 0 <= policy["scan_range_min_m"] < 8
         and 0 <= policy["planner_patience_s"] <= 300
         and 0 < policy["controller_patience_s"] <= 300
@@ -196,6 +223,8 @@ def validate(config, base=None):
         raise ValueError("Enable at least one obstacle sensor")
     from .segmentation import validate_segmentation
     segmentation = validate_segmentation(config.get("semantic_segmentation", {}), base, policy["camera_enabled"])
+    if policy["camera_geometry_backend"] not in ("legacy", "rtabmap"):
+        raise ValueError("camera_geometry_backend must be legacy or rtabmap")
     if policy["camera_enabled"] and not (policy["camera_geometry_enabled"] or segmentation["enabled"]):
         raise ValueError("Camera mode requires geometry detection or semantic segmentation")
     if not (isinstance(policy["camera_frame"], str) and policy["camera_frame"].strip()
@@ -222,7 +251,7 @@ def validate(config, base=None):
         raise ValueError('Camera RGB and segmentation outputs must use distinct topics')
     if bindings["camera_obstacles"] != "/outdoor/direct_nav/visual_obstacles":
         raise ValueError("Original depth node requires its guarded outdoor observation endpoint")
-    if len({bindings[k] for k in ("cloud", "scan", "camera_scan", "camera_costmap", "camera_obstacles", "camera_ground", "camera_status")}) != 7:
+    if len({bindings[k] for k in ("cloud", "scan", "obstacle_scan", "camera_scan", "camera_costmap", "camera_obstacles", "camera_ground", "camera_status")}) != 8:
         raise ValueError("Lidar and camera scan topics must be distinct")
     if bindings["odom"] == "/ODOM":
         raise ValueError("Unreliable manufacturer /ODOM is not a supported input")
@@ -242,7 +271,6 @@ def validate(config, base=None):
     if gait_output in (*bindings.values(), output, "/GAIT"):
         raise ValueError("Gait requests need a separate guarded UInt32 output topic")
     from .terrain_config import validate_terrain
-    terrain = validate_terrain(config.get("terrain", {}), policy, segmentation, gait_enabled)
     if not 0.5 <= policy["camera_max_range_m"] <= 10:
         raise ValueError("camera_max_range_m must be within [0.5, 10]")
     normalized = {**config, "params_file": str(path.resolve())}
@@ -257,14 +285,11 @@ def validate(config, base=None):
                     width=int(math.ceil(2*cycle['grid_half_width_m'])),
                     height=int(math.ceil(2*cycle['grid_half_width_m'])),
                     resolution=cycle['grid_resolution_m'],rolling=True)
-        terrain["observation_timeout_s"] = cycle["period_s"]
     projection = projection_config(config, policy)
     policy.update(derived)
     terrain = validate_terrain(config.get("terrain", {}), policy, segmentation, gait_enabled)
     if cycle["enabled"]:
         terrain["observation_timeout_s"] = cycle["period_s"]
-        if not terrain["enabled"]:
-            raise ValueError("decision_cycle.enabled requires terrain.enabled for one FSM step per cycle")
     if terrain["enabled"] and terrain["can_climb_stairs"]:
         from .nav2_parameters import parameters
         stairs = parameters(nav2, "controller_server").get("StairsFollowPath", {})

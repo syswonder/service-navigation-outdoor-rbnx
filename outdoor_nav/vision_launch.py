@@ -28,11 +28,9 @@ def vision_nodes(runtime, python, rosargs):
               "/semantic/current_grid": t["camera_semantics"],
               "/semantic/local_grid": "/outdoor/vision/semantic_grid"}
     args = [v for a, b in remaps.items() for v in ("-r", a+":="+b)]
+    # The in-process geometry backend avoids a second segmentation round trip.
     depth = dict(allow_outdoor_navigation=True, planning_frame="odom", base_frame="base_link",
-                 # RTAB-Map ground/obstacle segmentation replies in 0.36-0.82 s here while the
-    # pairing slot accepts at most 0.3 s, so every frame expired; the in-process
-    # geometry path already fits the ground plane (offset -0.42 in base_link).
-    geometry_primary=True, depth_backend="legacy", alignment_verified=p["camera_frame_confirmed"],
+                 geometry_primary=True, depth_backend=p["camera_geometry_backend"], alignment_verified=p["camera_frame_confirmed"],
                  geometry_expected_ground_z=p["camera_expected_ground_z_m"],
                  geometry_ground_z_tolerance=p["camera_ground_tolerance_m"],
                  max_ground_angle_deg=angle, max_range=p["camera_max_range_m"], min_height=.10, max_age=p["sensor_timeout_s"], pixel_stride=3)

@@ -6,6 +6,7 @@ from geometry_msgs.msg import Twist
 from std_msgs.msg import String, UInt32
 from rclpy.time import Time
 from .terrain_inputs import TerrainInputs
+from .core.gait import chassis_prepared
 
 
 class TerrainExecution:
@@ -32,7 +33,7 @@ class TerrainExecution:
         age = body.get('motion_feedback_age_s')
         fresh = (now-n.chassis_at < n.config['sensor_timeout_s'] and type(age) in (float, int)
                  and math.isfinite(age) and 0 <= age < n.config['sensor_timeout_s'])
-        ready = fresh and body.get('ready') is True and body.get('gait_output_enabled') is True
+        ready = chassis_prepared(body, now-n.chassis_at)
         stopped = (n.stationary_since is not None and now-n.stationary_since >= n.config['stop_hold_s']
                    and now-n.velocity_at < n.config['sensor_timeout_s'])
         yaw = None

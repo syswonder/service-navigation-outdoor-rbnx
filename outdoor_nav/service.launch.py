@@ -40,13 +40,14 @@ def nodes(context):
         ("/outdoor/localization", policy["localization"]),
         ("/outdoor/chassis_status", policy["chassis"]),
         ("/outdoor/scan", policy["scan"]),
+        ("/outdoor/obstacle_scan", policy["obstacle_scan"]),
         ("/outdoor/camera_scan", policy["camera_scan"]),
         ("/cmd_vel", runtime["velocity_output_topic"]),
     ]
     rosargs = ["--ros-args"] + [arg for a, b in remaps for arg in ("-r", a + ":=" + b)]
     projection = runtime["scan_projection"]
     terrain = runtime.get("terrain", {})
-    filter_cloud = terrain.get("enabled", False) or (terrain.get("slope_filter_enabled", False) and terrain.get("lidar_slope_enabled", True))
+    filter_cloud = robot["lidar_enabled"]
     camera_children, camera_optional = vision_nodes(runtime, worker_python, rosargs) if robot["camera_enabled"] else ([], [])
     children = [
         ExecuteProcess(

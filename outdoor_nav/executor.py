@@ -26,7 +26,7 @@ from tf2_ros import Buffer, TransformListener
 from unique_identifier_msgs.msg import UUID
 
 from .http import ApiError, serve
-from .core.guidance import RouteGuidance, validate_point
+from .core.guidance import RouteGuidance, validate_point, free_via_point, observed_obstacle
 from .core.tasks import TaskStore, TERMINAL, ProgressBudget
 from .core.scan_health import healthy_scan
 from rclpy.parameter import Parameter
@@ -121,10 +121,17 @@ class Executor(Node):
             raise ApiError(503, "Waiting for " + layer + " costmap")
         frame = message.header.frame_id
         robot, path = None, []
+        overlay_warnings = []
+        def transform_fresh(transform):
+            stamp = transform.header.stamp
+            age = self.get_clock().now().nanoseconds/1e9-stamp.sec-stamp.nanosec/1e9
+            return -.1 <= age < 3.
         try:
             transform = self.tf.lookup_transform(
                 frame, self.base_frame, rclpy.time.Time()
             )
+            if not transform_fresh(transform):
+                raise ValueError('Robot transform is stale')
             t, q = transform.transform.translation, transform.transform.rotation
             robot = {
                 "x": t.x,
@@ -138,7 +145,7 @@ class Executor(Node):
                 ),
             }
         except Exception:
-            pass  # No TF is displayed as unavailable, never as a fabricated pose.
+            overlay_warnings.append('robot_transform_unavailable')
         try:
             task = self.tasks.snapshot() or {}
             points = task.get("execution_path") or []
@@ -147,6 +154,8 @@ class Executor(Node):
                 path = points
             elif points:
                 transform = self.tf.lookup_transform(frame, path_frame, rclpy.time.Time())
+                if not transform_fresh(transform):
+                    raise ValueError('Path transform is stale')
                 t, angle = (
                     transform.transform.translation,
                     yaw(transform.transform.rotation),
@@ -160,7 +169,8 @@ class Executor(Node):
                     for p in points
                 ]
         except Exception:
-            pass
+            path = []
+            overlay_warnings.append('path_transform_unavailable')
         # Encode once per grid message, not once per viewer poll. No disk writes.
         map_from_frame = (
             {"x": 0.0, "y": 0.0, "yaw": 0.0, "age_s": 0.0} if frame == "map" else None
@@ -196,6 +206,7 @@ class Executor(Node):
             "robot": robot,
             "path": path,
             "map_from_frame": map_from_frame,
+            "overlay_warnings": overlay_warnings,
         }
 
     def on_odom(self, msg):
@@ -203,7 +214,7 @@ class Executor(Node):
         age = self.get_clock().now().nanoseconds / 1e9 - stamp
         t = msg.twist.twist
         if not -0.1 <= age < (
-            self.config["sensor_timeout_s"] if self.hardware else 1
+            self.config.get("localization_timeout_s", 3.0) if self.hardware else 1
         ) or not all(math.isfinite(v) for v in (t.linear.x, t.linear.y, t.angular.z)):
             return
         self.velocity = (math.hypot(t.linear.x, t.linear.y), abs(t.angular.z))
@@ -409,7 +420,7 @@ class Executor(Node):
                 and all(math.isfinite(position[k]) for k in ("x", "y", "yaw"))
                 and 0
                 <= position.get("age_s", math.inf)
-                < getattr(self, "config", {}).get("sensor_timeout_s", 1.0)
+                < getattr(self, "config", {}).get("pose_timeout_s", 3.0)
             ):
                 self.stopping = was_stopping
                 return position
@@ -430,18 +441,23 @@ class Executor(Node):
                 )
             if time.monotonic() >= deadline:
                 raise RuntimeError(
-                    "Position or navigation unavailable after %.1f s; stopped" % timeout
+                    "Navigation recovery timed out after %.1f s (%s); stopped"
+                    % (timeout, ", ".join(status.get("not_ready_reasons", [])))
                 )
             await self.pause(0.1)
 
     async def result(self, future, task_id, timeout=10):
-        began = self.get_clock().now().nanoseconds / 1e9
+        began = time.monotonic()
         while not future.done():
             if self.interrupted(task_id):
                 raise InterruptedError("Task canceled or superseded")
             if not self.status(False)["ready"]:
+                paused = time.monotonic()
                 await self.wait_for_ready_pose(task_id)
-            if self.get_clock().now().nanoseconds / 1e9 - began > timeout:
+                began += time.monotonic()-paused
+            if future.done():
+                break
+            if time.monotonic() - began > timeout:
                 raise RuntimeError("Nav2 action timed out")
             await self.pause()
         if self.interrupted(task_id):
@@ -455,7 +471,7 @@ class Executor(Node):
             now = time.monotonic()
             stopped = (
                 time.monotonic() - self.velocity_at
-                < (self.config["sensor_timeout_s"] if self.hardware else 1)
+                < (self.config.get("localization_timeout_s", 3.0) if self.hardware else 1)
                 and self.velocity[0]
                 <= (
                     self.config.get("stopped_linear_mps", 0.01)
@@ -524,8 +540,12 @@ class Executor(Node):
         path.header.frame_id = "map"
         path.header.stamp = self.get_clock().now().to_msg()
         start = validate_point(position)
+        window = list(window)
+        skipped = set()
         for offset, index in enumerate(window):
             point = guidance.points[index]
+            if index != len(guidance.points) - 1:
+                point = free_via_point(point, self.global_map)
             request = ComputePathToPose.Goal()
             request.goal.header = path.header
             request.goal.pose.position.x = point["x"]
@@ -554,6 +574,21 @@ class Executor(Node):
                 # A coincident destination still needs a path for final heading alignment.
                 leg = [request.start, *leg]
             if result.status != GoalStatus.STATUS_SUCCEEDED or len(leg) < 2:
+                now_s = self.get_clock().now().nanoseconds / 1e9
+                if (index < len(guidance.points)-1
+                        and self.scan is not None
+                        and healthy_scan(self.scan, now_s, self.config['sensor_timeout_s'])
+                        and observed_obstacle(guidance.points[index], self.global_map,
+                                              position, now_s, scan=self.scan)):
+                    next_index = index+1
+                    next_point = guidance.points[next_index]
+                    if (len(window) < 12
+                            and math.hypot(next_point['x']-position['x'],
+                                           next_point['y']-position['y']) <= 6.0):
+                        if offset+1 == len(window):
+                            window.append(next_index)
+                        skipped.add(index)
+                        continue
                 # A sampled station may itself be occupied. Try the next station
                 # on the SAME straight edge, allowing NavFn to go around it.
                 # Never skip a bend or the window/final goal to obtain a shortcut.
@@ -566,6 +601,8 @@ class Executor(Node):
                         <= 4.1
                     ):
                         continue
+                self.planner_failure = ("Planner returned status %s with %s poses at via %s (%.2f, %.2f)"
+                                        % (result.status, len(leg), index, point['x'], point['y']))
                 return None
             # NavFn tolerance can end a leg near (not exactly on) a via point.
             # Start the next leg at its ACTUAL end to avoid a disconnected join.
@@ -576,6 +613,9 @@ class Executor(Node):
             end = path.poses[-1].pose.position
             start = {"x": end.x, "y": end.y}
         # Intermediate leg-end orientations must not make the controller stop.
+        # Commit skipped stations only after a complete obstacle-aware path
+        # to a later station succeeds; a failed detour must not advance progress.
+        guidance.skipped.update(skipped)
         for a, b in zip(path.poses, path.poses[1:]):
             heading = math.atan2(
                 b.pose.position.y - a.pose.position.y,
@@ -608,6 +648,7 @@ class Executor(Node):
             state = self.tasks.snapshot(task_id, include_paths=True)
             if self.interrupted(task_id):
                 raise InterruptedError("Task canceled before planning")
+            self.active_follow_requests, self.active_follow_results = follow_requests, follow_results
             self.tasks.update(task_id, state="planning")
             position = await self.wait_for_ready_pose(task_id)
             # Preview and execution use exactly the same road-preference policy.
@@ -628,10 +669,19 @@ class Executor(Node):
             )
             started_sim = self.get_clock().now().nanoseconds / 1e9
             controller_used = None
+            recovery_used = (getattr(self, "handled_recovery", 0), getattr(self, "handled_epoch", None))
             while True:
                 if self.interrupted(task_id):
                     raise InterruptedError("Task canceled or superseded")
                 position = await self.wait_for_ready_pose(task_id)
+                recovery = (getattr(self, "handled_recovery", 0), getattr(self, "handled_epoch", None))
+                if recovery != recovery_used:
+                    current_points, follow_result, sent_window = [], None, None
+                    # Keep ordered route progress across a localization correction;
+                    # rebuilding from the original start would send the robot back.
+                    budget = ProgressBudget(planner_patience_s=policy.get("planner_patience_s", 0.0),
+                                            controller_patience_s=policy.get("controller_patience_s", 20.0))
+                    recovery_used = recovery
                 controller_id = self.controller_id()
                 if controller_used is not None and controller_id != controller_used:
                     self.stopping = True
@@ -677,11 +727,15 @@ class Executor(Node):
                         raise RuntimeError("Could not release controller at arrival")
                     if not await self.confirm_stop():
                         raise RuntimeError("Could not confirm robot stop at arrival")
+                    if self.hardware:
+                        await self.wait_for_arrival_confirmation(task_id)
                     if self.interrupted(task_id):
                         raise InterruptedError("Task canceled while stopping")
                     if not self.status(False)["ready"]:
                         raise RuntimeError("Localization or sensors lost at arrival")
                     stopped_pose = await self.wait_for_ready_pose(task_id)
+                    if self.hardware and (getattr(self, "handled_recovery", 0), getattr(self, "handled_epoch", None)) != recovery_used:
+                        continue
                     remaining = math.dist(
                         (stopped_pose["x"], stopped_pose["y"]),
                         (goal_point["x"], goal_point["y"]),
@@ -696,6 +750,8 @@ class Executor(Node):
                     # The estimate can move while braking. Resume planning rather
                     # than reporting arrival outside the unchanged tolerance.
                     current_points, follow_result = [], None
+                    if self.hardware:
+                        continue
                 if now - started_sim > 1800:
                     raise RuntimeError(
                         "Navigation exceeded the 1800 simulation-second task limit"
@@ -727,7 +783,8 @@ class Executor(Node):
                     if len(points) < 2:
                         if not budget.planned(False, now):
                             raise RuntimeError(
-                                "No traversable path in the sensor costmap"
+                                "No traversable path in the sensor costmap: "
+                                + getattr(self, "planner_failure", "planner returned no path")
                             )
                         self.stopping = True
                         if not await self.release_controller(
@@ -740,7 +797,8 @@ class Executor(Node):
                         self.tasks.update(
                             task_id,
                             state="planning",
-                            reason="暂时无可行路径，停车等待并重规划",
+                            reason="暂时无可行路径，停车等待并重规划: "
+                                   + getattr(self, "planner_failure", "planner returned no path"),
                         )
                         await self.pause(0.5)
                         continue
@@ -767,6 +825,8 @@ class Executor(Node):
                     command.path = path
                     command.controller_id = controller_id
                     command.goal_checker_id = "goal_checker"
+                    if self.hardware and (self.geo.get("fusion") or {}).get("recovery_id", 0) != getattr(self, "handled_recovery", 0):
+                        continue
                     pending = self.follow_client.send_goal_async(command)
                     follow_requests.append(pending)
 
@@ -827,8 +887,9 @@ class Executor(Node):
                 if not released or not stopped:
                     self.stop_failure = (
                         ((reason + "; ") if reason else "")
-                        + "Could not confirm controller release and robot stop; restart required"
+                        + "Could not confirm controller release and robot stop; waiting for verified stop"
                     )
+                    self.stop_recovery = (follow_requests, follow_results)
                     outcome, reason = "failed", self.stop_failure
                 self.tasks.update(
                     task_id,

@@ -3,11 +3,22 @@
 from copy import deepcopy
 import math
 
-from .guidance import distance, projection
+from .guidance import distance, projection, entered_next_segment
 
 FLAT = 0x3002
 STAIRS = 0x3003
 RAW_GAITS = {"flat": (0x1001, FLAT), "stairs": (0x1003, STAIRS)}
+
+
+
+def chassis_prepared(body, received_age):
+    """Mode and feedback permit a gait request; actual gait gates velocity later."""
+    ages = ((received_age, 1.), (body.get("motion_feedback_age_s"), 1.),
+            (body.get("usage_mode_age_s"), 3.))
+    return (body.get("state") == 17 and body.get("usage_mode") == 1
+            and body.get("gait_output_enabled") is True
+            and all(type(age) in (int, float) and math.isfinite(age) and 0 <= age < limit
+                    for age, limit in ages))
 
 
 def route_length(reference):
@@ -60,10 +71,9 @@ class RouteStation:
             px, py = point["x"] - b["x"], point["y"] - b["y"]
             crossed = px * dx + py * dy >= 0
             lateral = abs(px * dy - py * dx) / math.hypot(dx, dy)
-            current = projection(point, [a, b])
-            following = projection(point, [b, c])
-            turning = (distance(point, b) <= 0.3
-                       and following["distance_m"] < current["distance_m"])
+            # Use the planner's ordered corner rule; a valid obstacle detour
+            # must not leave gait progress stuck at the previous bend.
+            turning = entered_next_segment(point, a, b, c)
             if not ((crossed and lateral <= 1.5) or turning):
                 break
             self.index += 1
@@ -73,8 +83,9 @@ class RouteStation:
 
 
 class GaitSchedule:
-    def __init__(self, reference, intervals):
-        self.intervals = validate_intervals(reference, intervals)
+    def __init__(self, reference, intervals, *, flat_only=False):
+        self.flat_only = flat_only
+        self.intervals = validate_intervals(reference, intervals, check_codes=not flat_only)
         self.route = RouteStation(reference)
         self.stairs = []
         total = route_length(reference)
@@ -89,9 +100,17 @@ class GaitSchedule:
         self.target = None
         self.last_sent, self.attempts = -math.inf, 0
         self.switch_started = None
+        self.prepare_started = None
         self.failed = False
+        # The robot ignores pure-rotation commands in the stairs gait, so a
+        # rotation on a stairs section temporarily overrides the target to the
+        # flat gait: switch to flat, rotate, then switch back to stairs.
+        self.rotation_hold = False
+        self.rotation_since = None
 
     def desired(self, station):
+        if self.flat_only:
+            return FLAT
         if any(a <= station < b or (station == b == self.route.offsets[-1])
                for a, b in self.stairs):
             return STAIRS
@@ -100,25 +119,41 @@ class GaitSchedule:
                 return FLAT if item["gait"] == "flat" else None
         return None
 
-    def tick(self, position, now, actual, feedback_age_s, eligible, stopped=False, timeout_s=10.):
+    def tick(self, position, now, actual, feedback_age_s, eligible, stopped=False, timeout_s=5., prepare_timeout_s=15., rotating=False):
         station = self.route.update(position)
-        target = self.desired(station)
+        desired = self.desired(station)
+        if rotating and desired == STAIRS:
+            if not self.rotation_hold:
+                self.rotation_hold = True
+            self.rotation_since = now
+        elif self.rotation_hold and (not rotating and self.rotation_since is not None
+                                     and now - self.rotation_since >= 1.0):
+            self.rotation_hold = False
+            self.rotation_since = None
+        target = FLAT if self.rotation_hold and desired == STAIRS else desired
         if target != self.target:
             self.target, self.last_sent, self.attempts = target, -math.inf, 0
-            self.switch_started = None
+            self.switch_started = self.prepare_started = None
         fresh = math.isfinite(feedback_age_s) and 0 <= feedback_age_s < 1.
         confirmed = target is not None and fresh and actual == target
-        if not confirmed and self.switch_started is None:
-            self.switch_started = now
         if confirmed:
-            self.switch_started = None
-        if target is None or (self.switch_started is not None and now-self.switch_started >= timeout_s):
+            self.switch_started = self.prepare_started = None
+        elif self.prepare_started is None:
+            self.prepare_started = now
+        preparing_expired = (self.switch_started is None and self.prepare_started is not None
+                             and now - self.prepare_started >= prepare_timeout_s)
+        confirmation_expired = (self.switch_started is not None
+                                and now - self.switch_started >= timeout_s)
+        if target is None or preparing_expired or confirmation_expired:
             self.failed = True
         command = None
         if not self.failed and not confirmed and eligible and stopped and now - self.last_sent >= 1.:
             command, self.last_sent = target, now
+            if self.switch_started is None:
+                self.switch_started = now
             self.attempts += 1
         reason = ("unknown_route_gait" if target is None else
+                  "gait_prepare_timeout" if self.failed and preparing_expired else
                   "gait_switch_timeout" if self.failed else
                   None if confirmed else
                   "stopping_before_gait_switch" if not stopped else
@@ -130,4 +165,5 @@ class GaitSchedule:
             "route_progress_m": station, "reason": reason,
             "failed": self.failed, "motion_allowed": confirmed and not self.failed,
             "local_avoidance_enabled": target != STAIRS,
+            "rotation_hold": self.rotation_hold,
         }

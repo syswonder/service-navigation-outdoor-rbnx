@@ -1,10 +1,10 @@
 # 地形状态机与传感器优先级
 
-本实现对照 navigation main `fe738b6`（2026-11-17）。保留当前分支的独立雷达/视觉 costmap、原始 RGB-D 几何链路、可替换分割模型及现有 Robonix Driver/任务 API。没有合并主线的整套机器人参数。
+本实现已合并 navigation main `fe738b6`。保留当前分支的独立雷达/视觉 costmap、原始 RGB-D 几何链路、可替换分割模型及现有 Robonix Driver/任务 API。没有合并主线的整套机器人参数。
 
 ## 开关与兼容
 
-`terrain.enabled` 默认 false，旧部署继续执行已有路线/步态区间逻辑。开启后，实时状态机成为唯一的运动模式与步态请求管理者；旧地图步态区间只保留为记录信息，不再触发切换，其格式仍校验，硬件编号不再限定为山猫编号。`terrain.slope_filter_enabled` 独立控制线性高度阈值，默认 false；`slope_angle_deg` 默认 15°。这两个开关须由部署显式启用。
+`terrain.enabled` 默认 false，旧部署继续执行已有路线/步态区间逻辑。开启后，实时状态机监督地形动作；启用攀爬能力时才拥有地形步态请求。仅平地监督时共用平地导航步态准备与确认；旧地图步态区间只保留为记录信息，不再触发切换，其格式仍校验，硬件编号不再限定为山猫编号。`terrain.slope_filter_enabled` 独立控制线性高度阈值，默认 false；`slope_angle_deg` 默认 15°。这两个开关须由部署显式启用。
 
 `policy.lidar_enabled`、`camera_enabled`、`camera_geometry_enabled`、`semantic_segmentation.enabled` 继续独立控制各路输入。`policy.camera_max_range_m=4.0` 对视觉几何、语义投影、楼梯识别同时生效；按 base_link 前方的水平距离计算，后方和更远点不参与。模型仍对完整 RGB 图像推理，空间裁剪在深度反投影之后完成。
 

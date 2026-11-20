@@ -16,8 +16,30 @@ INTERVALS = [
 ORIGIN = {"latitude":30., "longitude":120.}
 
 
-def tick(schedule, station, now=0., actual=FLAT, age=0., eligible=True, stopped=True):
-    return schedule.tick({"x":station, "y":0.}, now, actual, age, eligible, stopped=stopped)
+def tick(schedule, station, now=0., actual=FLAT, age=0., eligible=True, stopped=True, rotating=False):
+    return schedule.tick({"x":station, "y":0.}, now, actual, age, eligible, stopped=stopped, rotating=rotating)
+
+
+def test_rotation_on_stairs_temporarily_switches_to_flat_gait():
+    schedule = GaitSchedule(REFERENCE, INTERVALS)
+    # Enter the stairs section and confirm the stairs gait.
+    assert tick(schedule, 4., 0.)[0] == STAIRS
+    state = tick(schedule, 4., 2., STAIRS)[1]
+    assert state["confirmed"] and state["motion_allowed"]
+    # A pure-rotation command overrides the target to flat and asks for it.
+    command, state = tick(schedule, 6., 3., STAIRS, rotating=True)
+    assert command == FLAT and state["target_code"] == FLAT and state["rotation_hold"]
+    assert not state["motion_allowed"]
+    # Once the flat gait is confirmed the rotation is allowed to run.
+    state = tick(schedule, 6., 5., FLAT, rotating=True)[1]
+    assert state["confirmed"] and state["motion_allowed"] and state["rotation_hold"]
+    # The hold persists through brief rotation gaps...
+    assert tick(schedule, 6., 5.5, FLAT)[1]["rotation_hold"]
+    # ...and releases after one second without rotation, switching back.
+    command, state = tick(schedule, 6., 6.6, FLAT)
+    assert command == STAIRS and not state["rotation_hold"]
+    state = tick(schedule, 6., 8., STAIRS)[1]
+    assert state["confirmed"] and state["motion_allowed"]
 
 
 def test_one_meter_before_and_after_boundaries():
@@ -77,6 +99,16 @@ def test_nearby_stairs_merge_and_parallel_road_does_not_skip_progress():
     route = RouteStation([{"x":0.,"y":0.},{"x":20.,"y":0.},{"x":20.,"y":1.},{"x":0.,"y":1.}])
     assert route.update({"x":5.,"y":1.}) == 5.
     assert route.update({"x":4.,"y":0.}) == 5.
+
+
+def test_rounded_corner_advances_without_skipping_to_a_distant_parallel_road():
+    route = RouteStation([{"x": 0., "y": 0.}, {"x": 3., "y": 0.},
+                          {"x": 3., "y": 2.}, {"x": 6., "y": 2.}])
+    route.update({"x": 2.8, "y": 0.})
+    assert route.update({"x": 2.85, "y": 0.4}) == pytest.approx(3.4)
+    route.update({"x": 3., "y": 1.8})
+    assert route.update({"x": 3.4, "y": 1.85}) == pytest.approx(5.4)
+    assert route.update({"x": 5., "y": 2.}) == pytest.approx(7.)
 
 
 def test_sensor_approach_is_validated_and_stairs_shift_with_its_length():
@@ -144,6 +176,8 @@ def test_worker_stops_until_actual_feedback_and_controller_match(monkeypatch):
     velocities=[]
     node.command_pub=SimpleNamespace(publish=lambda msg:velocities.append(msg.linear.x))
     node.stopping = False
+    node.raw_command=SimpleNamespace(linear=SimpleNamespace(x=0.), angular=SimpleNamespace(z=0.))
+    node.raw_received=100.
     node.chassis = {"state":17,"gait":FLAT,"usage_mode":1,"motion_feedback_age_s":.01,
                     "usage_mode_age_s":.01,"gait_output_enabled":True}
     node.chassis_at = 100.
@@ -153,6 +187,7 @@ def test_worker_stops_until_actual_feedback_and_controller_match(monkeypatch):
     assert sent == [STAIRS] and velocities==[0.]
     assert not node.tasks.snapshot()["gait_status"]["confirmed"]
     node.controller_id=lambda:'StairsFollowPath'
+    node.gait_confirmed=lambda task: OutdoorExecutor.gait_confirmed(node, task)
     assert not OutdoorExecutor.motion_allowed(node,node.tasks.snapshot())
     node.chassis['gait']=STAIRS
     OutdoorExecutor.gait_tick(node)
@@ -163,3 +198,23 @@ def test_worker_stops_until_actual_feedback_and_controller_match(monkeypatch):
     node.tasks.cancel(task["task_id"])
     OutdoorExecutor.gait_tick(node)
     assert sent == [STAIRS] and node.gait_schedule is None
+
+
+def test_prepare_and_confirmation_have_separate_deadlines():
+    schedule = GaitSchedule(REFERENCE, INTERVALS)
+    assert tick(schedule, 5., 0., stopped=False)[0] is None
+    assert not tick(schedule, 5., 8., stopped=False)[1]['failed']
+    assert tick(schedule, 5., 9.)[0] == STAIRS
+    assert not tick(schedule, 5., 13.)[1]['failed']
+    assert tick(schedule, 5., 14.)[1]['reason'] == 'gait_switch_timeout'
+    waiting = GaitSchedule(REFERENCE, INTERVALS)
+    tick(waiting, 5., 0., eligible=False)
+    assert tick(waiting, 5., 15., eligible=False)[1]['reason'] == 'gait_prepare_timeout'
+
+
+def test_gait_progress_uses_the_same_corner_detour_as_route_guidance():
+    route = RouteStation([{'x':0.,'y':0.}, {'x':3.,'y':0.}, {'x':3.,'y':2.}, {'x':6.,'y':2.}])
+    for point in ({'x':2.6,'y':.23}, {'x':3.4,'y':.73}, {'x':3.76,'y':1.37},
+                  {'x':4.34,'y':1.93}, {'x':5.56,'y':2.}):
+        station = route.update(point)
+    assert station == pytest.approx(7.56)

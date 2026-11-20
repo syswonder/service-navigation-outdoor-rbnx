@@ -38,6 +38,14 @@ def projection(point, points):
     return best
 
 
+
+def entered_next_segment(point, a, b, c):
+    """Recognize an ordered corner detour, without searching later road arms."""
+    current = projection(point, [a, b])
+    following = projection(point, [b, c])
+    return following["offset_m"] > 0 and following["distance_m"] < current["distance_m"]
+
+
 def validate_point(value):
     if not isinstance(value, dict) or not all(
         isinstance(value.get(k), (int, float))
@@ -47,6 +55,74 @@ def validate_point(value):
     ):
         raise ValueError("A map point requires finite x and y in meters")
     return {k: float(value[k]) for k in ("x", "y")}
+
+
+def free_via_point(point, grid, radius_m=1.0):
+    """Move an occupied temporary station within 1 m; never invent free space.
+
+    The collision-aware planner still has to connect this candidate. Final
+    destinations must not be passed through this function.
+    """
+    if grid is None:
+        return point
+    meta = grid.info
+    resolution = meta.resolution
+    col = math.floor((point["x"] - meta.origin.position.x) / resolution)
+    row = math.floor((point["y"] - meta.origin.position.y) / resolution)
+
+    def free(x, y):
+        return (0 <= x < meta.width and 0 <= y < meta.height
+                and 0 <= grid.data[y * meta.width + x] < 50)
+
+    if free(col, row):
+        return point
+    cells = math.ceil(radius_m / resolution)
+    best, best_distance = point, math.inf
+    for y in range(max(0, row-cells), min(meta.height, row+cells+1)):
+        for x in range(max(0, col-cells), min(meta.width, col+cells+1)):
+            if not free(x, y):
+                continue
+            candidate = {"x": meta.origin.position.x + (x+.5)*resolution,
+                         "y": meta.origin.position.y + (y+.5)*resolution}
+            delta = distance(point, candidate)
+            if delta <= radius_m and delta < best_distance:
+                best, best_distance = candidate, delta
+    return best
+
+
+def observed_obstacle(point, grid, robot, now_s, timeout_s=3.0, scan=None):
+    """Only known occupied cells in the live lidar's six-metre marking range."""
+    if grid is None or grid.header.frame_id != "map":
+        return False
+    stamp = grid.header.stamp.sec + grid.header.stamp.nanosec / 1e9
+    if not -0.1 <= now_s-stamp < timeout_s or distance(point, robot) > 6.0:
+        return False
+    if scan is not None:
+        # Confirm a current return near this station, rather than skip on an
+        # old mark elsewhere in the rolling map. Live scans use base_link.
+        if scan.header.frame_id != 'base_link':
+            return False
+        dx, dy = point['x']-robot['x'], point['y']-robot['y']
+        co, si = math.cos(robot['yaw']), math.sin(robot['yaw'])
+        px, py = co*dx+si*dy, -si*dx+co*dy
+        hit = False
+        for i, value in enumerate(scan.ranges):
+            if not (math.isfinite(value) and scan.range_min <= value <= scan.range_max):
+                continue
+            beam = scan.angle_min+i*scan.angle_increment
+            if math.hypot(value*math.cos(beam)-px, value*math.sin(beam)-py) <= .8:
+                hit = True
+                break
+        if not hit:
+            return False
+    meta = grid.info
+    q = meta.origin.orientation
+    yaw = math.atan2(2*(q.w*q.z+q.x*q.y), 1-2*(q.y*q.y+q.z*q.z))
+    dx, dy = point['x']-meta.origin.position.x, point['y']-meta.origin.position.y
+    col = math.floor((math.cos(yaw)*dx+math.sin(yaw)*dy)/meta.resolution)
+    row = math.floor((-math.sin(yaw)*dx+math.cos(yaw)*dy)/meta.resolution)
+    return (0 <= col < meta.width and 0 <= row < meta.height
+            and grid.data[row*meta.width+col] >= 99)
 
 
 class SampledPolyline(Sequence):
@@ -118,6 +194,7 @@ class RouteGuidance:
         self.points = SampledPolyline(corners)
         self.bends = set(self.points.indices[1:])
         self.index = min(1, len(self.points) - 1)
+        self.skipped = set()
 
     @property
     def final_leg(self):
@@ -134,12 +211,16 @@ class RouteGuidance:
         Neither test can skip ahead to a spatially adjacent, later road segment.
         """
         while not self.final_leg:
+            if self.index in self.skipped:
+                self.index += 1
+                continue
             a, b = self.points[self.index - 1 : self.index + 1]
             dx, dy = b["x"] - a["x"], b["y"] - a["y"]
             px, py = position["x"] - b["x"], position["y"] - b["y"]
             crossed = px * dx + py * dy >= 0
             lateral = abs(px * dy - py * dx) / math.hypot(dx, dy)
-            if distance(position, b) > 0.6 and not (crossed and lateral <= 1.5):
+            turned = entered_next_segment(position, a, b, self.points[self.index + 1])
+            if distance(position, b) > 0.6 and not (crossed and lateral <= 1.5) and not turned:
                 break
             self.index += 1
         end, ahead = self.index, distance(position, self.points[self.index])

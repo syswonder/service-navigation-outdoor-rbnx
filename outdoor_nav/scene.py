@@ -7,6 +7,12 @@ from pathlib import Path
 import re
 import tempfile
 import threading
+import time
+from urllib.request import urlopen
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
+from logging.handlers import RotatingFileHandler
+import logging
 
 
 from .http import ApiError
@@ -86,14 +92,56 @@ class AtlasLocalization:
 
 class SceneNavigation:
     def __init__(self, run_dir="rbnx-build/scene_requests", execution=None, policy=None,
-                 execution_enabled=False, localization_config_path=None):
+                 execution_enabled=False, localization_config_path=None, navigation_http_url=None):
+        if navigation_http_url is not None:
+            address = urlsplit(navigation_http_url)
+            if (address.scheme != 'http' or address.hostname not in ('127.0.0.1', 'localhost', '::1')
+                    or address.username or address.password or address.query or address.fragment
+                    or address.path not in ('', '/')):
+                raise ValueError('navigation_http_url must be a local HTTP origin')
+        self.navigation_http_url = navigation_http_url.rstrip('/') if navigation_http_url else None
         self.current_map = None
+        self.localization_log = None
+        self.localization_logged_at = -float("inf")
+        self.localization_logged_stage = None
         self.localization = AtlasLocalization(localization_config_path) if localization_config_path else None
         self.execution = execution or AtlasExecution()
         self.execution_enabled = execution_enabled
         self.run_dir = Path(run_dir)
         self.lock = threading.RLock()
         self.policy = {"fixed_arrival_m": 3.0, "float_arrival_m": 3.0, **(policy or {})}
+
+    def costmap(self, layer):
+        if layer not in ('global', 'local'):
+            raise ApiError(404, 'Unknown costmap layer')
+        if not self.navigation_http_url:
+            raise ApiError(503, 'Navigation costmap endpoint is not configured')
+        try:
+            with urlopen(self.navigation_http_url+'/api/costmaps/'+layer, timeout=2.) as response:
+                return json.load(response)
+        except HTTPError as error:
+            try:
+                detail = json.load(error).get('error', str(error))
+            except (ValueError, AttributeError):
+                detail = str(error)
+            raise ApiError(503, detail) from error
+        except (URLError, TimeoutError, OSError, ValueError) as error:
+            raise ApiError(503, 'Navigation costmap unavailable: '+str(error)) from error
+
+    def clouds(self):
+        if not self.navigation_http_url:
+            raise ApiError(503, 'Navigation cloud endpoint is not configured')
+        try:
+            with urlopen(self.navigation_http_url + '/api/clouds', timeout=2.) as response:
+                return json.load(response)
+        except HTTPError as error:
+            try:
+                detail = json.load(error).get('error', str(error))
+            except (ValueError, AttributeError):
+                detail = str(error)
+            raise ApiError(503, detail) from error
+        except (URLError, TimeoutError, OSError, ValueError) as error:
+            raise ApiError(503, 'Navigation cloud unavailable: ' + str(error)) from error
 
     def bind_map(self, snapshot):
         with self.lock:
@@ -108,6 +156,8 @@ class SceneNavigation:
 
     def status(self, *_):
         value = self.execution.status()
+        if value.get('error'):
+            raise ValueError(value['error'])
         reference = value.get("coordinate_reference") or {}
         current = self.current_map
         matches = (
@@ -128,7 +178,28 @@ class SceneNavigation:
             value["ready"] = False
             value["not_ready_reasons"] = [*value.get("not_ready_reasons", []),
                                          "map_coordinate_reference_mismatch"]
+        fusion = value.get("fusion")
+        if isinstance(fusion, dict):
+            self.record_localization(value)
         return value
+
+    def record_localization(self, value):
+        fusion = value["fusion"]
+        stage = (value.get("localization_grade"), fusion.get("rtk_grade"), fusion.get("stage"), fusion.get("recovery_id"))
+        with self.lock:
+            now = time.monotonic()
+            if now-self.localization_logged_at < 1. and stage == self.localization_logged_stage:
+                return
+            if self.localization_log is None:
+                self.run_dir.mkdir(parents=True, exist_ok=True)
+                self.localization_log = RotatingFileHandler(self.run_dir/"localization.jsonl", maxBytes=2*1024*1024, backupCount=2, encoding="utf-8")
+            fields = ("stage", "rtk_grade", "estimate_valid", "navigation_ready", "inertial", "inertial_elapsed_s",
+                      "fusion_elapsed_s", "fusion_timer_reference", "outage_s", "recovery_id", "uncertainty")
+            record = {"recorded_at_unix_s": time.time(), "map_id": (value.get("coordinate_reference") or {}).get("map_id"),
+                      "grade": value.get("localization_grade"), **{k: fusion.get(k) for k in fields}}
+            self.localization_log.emit(logging.LogRecord("outdoor.localization", logging.INFO, "", 0,
+                                                        json.dumps(record, allow_nan=False), (), None))
+            self.localization_logged_at, self.localization_logged_stage = now, stage
 
     def _follow_recorded(self, request_id, source, build):
         if not self.execution_enabled:

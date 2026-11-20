@@ -78,3 +78,23 @@ def test_retry_storage_bound_keeps_existing_ids(nav, monkeypatch):
     with pytest.raises(ApiError,match='storage is full'):
         nav.submit_reference(route(),'a'*32,{})
     assert len(list(nav.run_dir.glob('*.json')))==1
+
+
+def test_costmap_proxy_works_in_check_mode_and_preserves_layer_failures():
+    from types import SimpleNamespace
+    from outdoor_nav.http import serve
+    calls=[]
+    def costmap(layer, standard=False):
+        calls.append((layer,standard))
+        if layer=='local':raise ApiError(503,'Waiting for local costmap')
+        return {'frame_id':'map','image':'actual-grid','stale':True,'age_s':4.}
+    server=serve(SimpleNamespace(costmap_snapshot=costmap),port=0)
+    try:
+        reader=SceneNavigation(execution_enabled=False,navigation_http_url=f'http://127.0.0.1:{server.server_port}')
+        assert reader.costmap('global')['image']=='actual-grid'
+        with pytest.raises(ApiError,match='Waiting for local'):reader.costmap('local')
+        with pytest.raises(ApiError) as error:reader.costmap('../status')
+        assert error.value.status==404
+        assert calls==[('global',False),('local',False)]
+    finally:
+        server.shutdown();server.server_close()

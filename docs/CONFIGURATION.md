@@ -28,7 +28,7 @@ YAML 支持以下占位符，绑定到 `topic_remap` 显式值或 Atlas 解析�
 | 占位符 | 角色 |
 | --- | --- |
 | `__ROBONIX_ODOM_TOPIC__` | `odom`，独立定位服务的 Odometry |
-| `__ROBONIX_SCAN_TOPIC__` | `scan`，雷达独立投影结果 |
+| `__ROBONIX_SCAN_TOPIC__` | `obstacle_scan`，雷达障碍标记门；原始 `scan` 不变 |
 | `__ROBONIX_SCAN_CLOUD_TOPIC__` | `cloud`，原始雷达 PointCloud2 |
 | `__ROBONIX_CAMERA_COSTMAP_TOPIC__` | `camera_costmap`，原相机检测后经过稳定性过滤的本层代价图 |
 
@@ -54,7 +54,7 @@ YAML 支持以下占位符，绑定到 `topic_remap` 显式值或 Atlas 解析�
 `camera_layer.max_age_s` 在 YAML 中配置；`policy.sensor_timeout_s` 是执行与命令守卫的
 反馈时效限制，两者各自生效。
 
-相机沿用原 RGB-D 检查、RTAB-Map、正负障碍检测和 可替换模型辅助语义。
+相机沿用 RGB-D 检查、可选 RTAB-Map 后端、正负障碍检测与可替换语义模型。后端由 `policy.camera_geometry_backend` 显式选择。
 新增稳定性过滤仍在原检测结果之后；本次参数调整不改检测算法。
 
 雷达为 3D 输入时使用 `scan_projection`；`enabled` 未指定则跟随雷达开关。
@@ -105,3 +105,5 @@ YAML 支持以下占位符，绑定到 `topic_remap` 显式值或 Atlas 解析�
 地形状态机、四路优先级、共享坡度阈值与新参数见 [地形导航说明](TERRAIN.md)。新状态机和高度阈值需显式开启；视觉前向距离默认 4 m，保留原有传感器独立开关。
 
 周期式方向引导、配对定位输入和时效规则见 [周期说明](DECISION_CYCLE.md)。该模式须显式启用。
+
+准备与运动的分离、模式组合和统一时间预算见 [执行架构](EXECUTION.md)。
