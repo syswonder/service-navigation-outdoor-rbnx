@@ -178,7 +178,10 @@ def prepare(config, topics, policy):
         if config.get("gait_switching_enabled", False) and "StairsFollowPath" not in plugins:
             raise ValueError("Gait switching requires deploy-owned StairsFollowPath parameters")
         # Derived guard limits never rewrite the selected controller/smoother.
-        derived = {"max_speed_mps": linear, "max_angular_speed_rps": angular}
+        goal_tolerance = number(controller.get("goal_checker", {}).get("xy_goal_tolerance", 0.25),
+                                "goal_checker.xy_goal_tolerance", 0.0)
+        derived = {"max_speed_mps": linear, "max_angular_speed_rps": angular,
+                   "controller_goal_tolerance_m": goal_tolerance}
         for name, frame in (("global_costmap", "map"), ("local_costmap", "odom")):
             costmap = parameters(document, name)
             if costmap.get("global_frame") != frame or costmap.get("robot_base_frame") != "base_link":
