@@ -99,15 +99,15 @@ def test_skip_evidence_requires_recent_known_occupied_nearby_cell():
     assert not observed_obstacle(point, grid, {'x':9., 'y':9.}, 10.1)
 
 
-def test_failed_occupied_bend_skips_only_after_next_path_succeeds():
-    # Execute the production async method without importing ROS on this host.
+def planner_harness():
+    # Execute the production async methods without importing ROS on this host.
     import ast
-    import asyncio
     from pathlib import Path
     from outdoor_nav.core.guidance import validate_point, free_via_point, observed_obstacle
     tree = ast.parse((Path(__file__).parents[1]/'outdoor_nav/executor.py').read_text())
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'Executor')
-    method = next(n for n in cls.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'guided_path')
+    methods = [n for n in cls.body if isinstance(n, ast.AsyncFunctionDef)
+               and n.name in ('guided_path', 'plan_guided_window')]
     def pose(x=0., y=0.):
         return S(pose=S(position=S(x=x, y=y), orientation=S(z=0., w=1.)))
     def goal():
@@ -116,7 +116,15 @@ def test_failed_occupied_bend_skips_only_after_next_path_succeeds():
                  free_via_point=free_via_point, observed_obstacle=observed_obstacle,
                  ComputePathToPose=S(Goal=goal), GoalStatus=S(STATUS_SUCCEEDED=4),
                  healthy_scan=healthy_scan, math=math)
-    exec(compile(ast.Module(body=[method], type_ignores=[]), '<production>', 'exec'), scope)
+    exec(compile(ast.Module(body=methods, type_ignores=[]), '<production>', 'exec'), scope)
+    return scope, pose
+
+
+def test_failed_occupied_bend_skips_only_after_next_path_succeeds():
+    import asyncio
+    from functools import partial
+
+    scope, pose = planner_harness()
     a, b, c = {'x':0., 'y':0.}, {'x':2., 'y':0.}, {'x':2., 'y':2.}
     def run(final=False, blocked_next=False, stale=False, no_hit=False):
         g = RouteGuidance([a,b] if final else [a,b,c], a, b if final else c)
@@ -136,6 +144,7 @@ def test_failed_occupied_bend_skips_only_after_next_path_succeeds():
             ranges=[math.inf if no_hit else 2.],range_min=.1,range_max=8.,angle_min=0.,angle_increment=.1),
             config={'sensor_timeout_s':1.}, path_client=S(send_goal_async=send),result=result,
             get_clock=lambda:S(now=lambda:S(nanoseconds=10_100_000_000,to_msg=lambda:None)))
+        n.plan_guided_window = partial(scope['plan_guided_window'], n)
         path=asyncio.run(scope['guided_path'](n,g,(1,),{**a,'yaw':0.},'task'))
         return path,g,called
     path,g,called=run()
@@ -144,3 +153,55 @@ def test_failed_occupied_bend_skips_only_after_next_path_succeeds():
     for kwargs in ({'final':True},{'blocked_next':True},{'stale':True},{'no_hit':True}):
         path,g,called=run(**kwargs)
         assert path is None and not g.skipped
+
+
+def test_guided_path_bypasses_straight_samples_and_retries_when_needed():
+    import asyncio
+    from functools import partial
+
+    scope, pose = planner_harness()
+    start, end = {'x': 0., 'y': 0.}, {'x': 6., 'y': 0.}
+    guidance = RouteGuidance([], start, end)
+    calls = []
+
+    def run(failed_calls):
+        calls.clear()
+
+        def send(request):
+            point = request.goal.pose.position
+            calls.append(point.x)
+            success = len(calls) not in failed_calls
+            result = S(status=4 if success else 6, result=S(path=S(
+                poses=[request.start, pose(point.x, point.y)] if success else []
+            )))
+            return S(accepted=True, get_result_async=lambda: result)
+
+        async def result(value, task):
+            return value
+
+        node = S(
+            hardware=False, global_map=None, scan=None, result=result,
+            path_client=S(send_goal_async=send),
+            get_clock=lambda: S(now=lambda: S(to_msg=lambda: None, nanoseconds=0)),
+        )
+        node.plan_guided_window = partial(scope['plan_guided_window'], node)
+        return asyncio.run(scope['guided_path'](node, guidance, (1, 2, 3), start, 'task'))
+
+    assert run(set()).poses[-1].pose.position.x == 6.
+    assert calls == [6.]
+    assert run({1, 4}).poses[-1].pose.position.x == 4.
+    assert calls == [6., 2., 4., 6.]
+    assert guidance.points[-1] == end
+    assert not guidance.skipped
+
+
+def test_progress_advances_at_the_adjusted_station():
+    start, goal = {'x': 0., 'y': 0.}, {'x': 6., 'y': 0.}
+    guidance = RouteGuidance([], start, goal)
+    position = {'x': 1.75, 'y': 0.8}
+    assert guidance.window(position)[0] == 1
+
+    guidance.adjusted[1] = {'x': 2., 'y': 0.8}
+    assert guidance.window(position)[0] == 2
+    assert guidance.points[1] == {'x': 2., 'y': 0.}
+    assert guidance.points[-1] == goal
