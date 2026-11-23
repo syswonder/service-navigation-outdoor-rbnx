@@ -706,7 +706,13 @@ class Executor(Node):
             started_sim = self.get_clock().now().nanoseconds / 1e9
             controller_used = None
             recovery_used = (getattr(self, "handled_recovery", 0), getattr(self, "handled_epoch", None))
-            while True:
+            ranger = getattr(self, "ranger", None)
+            if ranger is not None:
+                completion_pose = await ranger.run(
+                    task_id, goal_point, guidance, tolerance, follow_requests, follow_results
+                )
+                outcome, stop_confirmed = "succeeded", True
+            while ranger is None:
                 if self.interrupted(task_id):
                     raise InterruptedError("Task canceled or superseded")
                 position = await self.wait_for_ready_pose(task_id)

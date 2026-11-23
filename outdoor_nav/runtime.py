@@ -101,7 +101,7 @@ class OutdoorExecutor(Executor):
             for n in ("planner_server", "controller_server")
         }
         self.command_pub = self.create_publisher(Twist, "/outdoor/safe_command", 10)
-        if self.config["camera_enabled"]:
+        if self.config["camera_enabled"] or self.config.get("ranger_descent_enabled", False):
             self.publish_camera_mount()
         self.cycle = None
         self.terrain = None
@@ -126,6 +126,10 @@ class OutdoorExecutor(Executor):
         if self.runtime.get("decision_cycle", {}).get("enabled"):
             from .cycle_runtime import CycleNavigation
             self.cycle = CycleNavigation(self)
+        self.ranger = None
+        if self.config.get("ranger_descent_enabled", False):
+            from .descent_execution import RangerDescent
+            self.ranger = RangerDescent(self)
         self.path_pub = self.create_publisher(
             NavPath, "/navigation/execution_path", LATCHED
         )
@@ -322,6 +326,14 @@ class OutdoorExecutor(Executor):
         if getattr(self, "cycle", None) is not None and not self.cycle.allowed():
             self.command_pub.publish(Twist())
             return
+        ranger = getattr(self, "ranger", None)
+        if ranger is not None and ranger.turn:
+            task = self.tasks.snapshot(self.owner, include_paths=False) if self.owner else None
+            command = Twist()
+            if task and not task["cancel_requested"] and self.status(False)["ready"]:
+                command.angular.z = ranger.turn
+            self.command_pub.publish(command)
+            return
         if getattr(self, "terrain", None) is None:
             return super().safety_tick()
         with self.state_lock:
@@ -415,6 +427,10 @@ class OutdoorExecutor(Executor):
         self._state(msg, "geo")
         if self.cycle is not None:
             self.cycle.sample(self.geo)
+        if getattr(self, "ranger", None) is not None and correction_pending(self.geo, getattr(self, "handled_recovery", 0),
+                                                          getattr(self, "handled_epoch", None)):
+            self.ranger.feed.invalidate()
+            self.ranger.turn = 0.
         if self.owner and correction_pending(self.geo, getattr(self, "handled_recovery", 0),
                                              getattr(self, "handled_epoch", None)):
             self.stopping = True
@@ -642,7 +658,8 @@ class OutdoorExecutor(Executor):
         req = SetParametersAtomically.Request()
         req.parameters = [
             Parameter(
-                "goal_checker.xy_goal_tolerance", value=float(min(tolerance, 0.5))
+                "goal_checker.xy_goal_tolerance",
+                value=float(min(tolerance, .17 if getattr(self, "ranger", None) is not None else .5))
             ).to_parameter_msg()
         ]
         result = await self.result(self.controller_parameters.call_async(req), task_id)

@@ -121,6 +121,7 @@ def test_ranger_blocks_controller_even_when_original_map_is_free(depth_live):
         for _ in range(10):
             Watchdog.tick(n)
             sent = n.pub.publish.call_args.args[0]
+            assert sent.linear.x == 0. and sent.angular.z == 0.
             speed = max(sent.linear.x, n.speed_sample[0] - .55*.05)
             n.speed_sample = (speed, 10., 10.)
     sent = n.pub.publish.call_args.args[0]
