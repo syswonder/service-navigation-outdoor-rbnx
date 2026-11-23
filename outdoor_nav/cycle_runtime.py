@@ -4,28 +4,35 @@ import math
 import time
 from array import array
 from collections import deque
+from threading import Lock
 import numpy as np
-from geometry_msgs.msg import PoseStamped, Twist
+from geometry_msgs.msg import Twist
 from nav_msgs.msg import OccupancyGrid
 from nav2_msgs.action import ComputePathToPose, FollowPath, NavigateToPose
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
-from rclpy.duration import Duration
 from tf2_ros import TransformException
 from .core.heuristic import HintQueue, average_hint, body_delta
 from .core.cycle_grid import fuse_grid
 from .core.tasks import ProgressBudget
+from .core.scan_health import acquisition_time, healthy_scan
+
+
+class SnapshotUnavailable(ValueError):
+    """A sensor or its acquisition-time transform has not arrived yet."""
 
 
 class CycleNavigation:
     def __init__(self, node):
         self.n, self.p = node, node.runtime['decision_cycle']
+        self.input_lock = Lock()
         self.samples = deque(maxlen=self.p['sample_limit'])
         self.scan = self.camera = None
+        self.camera_stamp = -math.inf
         self.scans = deque(maxlen=64)
-        self.acks = {}
+        self.global_ack = None
         self.number, self.valid_until = 0, -math.inf
         self.active_result = None
         self.report = {'enabled': True, 'ready': False}
@@ -39,8 +46,10 @@ class CycleNavigation:
             node.create_subscription(OccupancyGrid, t['camera_costmap'], self.on_camera, 5)
 
     def on_scan(self, msg):
-        self.scan = msg
-        self.scans.append(msg)
+        with self.input_lock:
+            if self.scan is None or acquisition_time(msg) > acquisition_time(self.scan):
+                self.scan = msg
+                self.scans.append(msg)
 
     def on_camera(self, msg):
         # Invalid certificates produce a fresh, entirely unknown grid.
@@ -48,12 +57,17 @@ class CycleNavigation:
         valid = (msg.header.frame_id == 'odom'
                  and len(msg.data) == msg.info.width * msg.info.height
                  and np.any(np.frombuffer(msg.data, dtype=np.int8) >= 0))
-        self.camera = msg if valid else None
+        stamp = acquisition_time(msg)
+        with self.input_lock:
+            if stamp >= self.camera_stamp:
+                self.camera_stamp = stamp
+                self.camera = msg if valid else None
 
     def ack(self, msg):
         try:
             node, stamp = msg.data.rsplit(':', 1)
-            self.acks[node] = int(stamp)
+            if node.rstrip('/').split('/')[-1] == 'global_costmap':
+                self.global_ack = int(stamp)
         except (ValueError, TypeError):
             pass
 
@@ -70,12 +84,16 @@ class CycleNavigation:
             stamp = sample['stamp_s']
             if not math.isfinite(stamp) or stamp <= 0:
                 return
-            if self.samples and sample['epoch'] != self.samples[-1]['epoch']:
-                self.valid_until = -math.inf
-                self.samples.clear()
-            if (not self.samples or (stamp > self.samples[-1]['stamp_s'] and
-                    sample.get('sample_id',stamp) != self.samples[-1].get('sample_id',self.samples[-1]['stamp_s']))):
-                self.samples.append(sample)
+            with self.input_lock:
+                if self.samples and sample['epoch'] != self.samples[-1]['epoch']:
+                    self.valid_until = -math.inf
+                    self.samples.clear()
+                    self.scan = self.camera = None
+                    self.camera_stamp = -math.inf
+                    self.scans.clear()
+                if (not self.samples or (stamp > self.samples[-1]['stamp_s'] and
+                        sample.get('sample_id',stamp) != self.samples[-1].get('sample_id',self.samples[-1]['stamp_s']))):
+                    self.samples.append(sample)
         except (TypeError, KeyError):
             return
 
@@ -85,24 +103,39 @@ class CycleNavigation:
         if self.active_result is not None and self.active_result.done():
             return False
         now = self.n.get_clock().now().nanoseconds / 1e9
-        sources = []
-        if self.n.config['lidar_enabled']:
-            sources.append(self.scan)
-        if self.n.config['camera_enabled']:
-            sources.append(self.camera)
-        return bool(sources) and all(
-            msg is not None and 0 <= now - Time.from_msg(msg.header.stamp).nanoseconds / 1e9 < self.p['period_s']
-            for msg in sources
+        age = self.n.config['sensor_timeout_s']
+        with self.input_lock:
+            scan, camera = self.scan, self.camera
+        return (
+            (not self.n.config['lidar_enabled'] or
+             scan is not None and 0 <= now-acquisition_time(scan) and healthy_scan(scan, now, age))
+            and (not self.n.config['camera_enabled'] or
+                 camera is not None and 0 <= now-acquisition_time(camera) < age)
         )
 
+    def paired_samples(self, now):
+        age = min(self.p['period_s'], self.n.config['localization_timeout_s'])
+        with self.input_lock:
+            return self._fresh_samples(now, age)
+
+    def _fresh_samples(self, now, age):
+        return [s for s in self.samples if 0 <= now-s['stamp_s'] < age]
+
+    def snapshot_inputs(self):
+        age = min(self.p['period_s'], self.n.config['localization_timeout_s'])
+        with self.input_lock:
+            now = self.n.get_clock().now().nanoseconds / 1e9
+            return now, self._fresh_samples(now, age), (tuple(self.scans), self.camera)
+
     async def future(self, future, task, deadline):
-        while not future.done():
+        while True:
             if self.n.interrupted(task):
                 raise InterruptedError('Task canceled during cycle')
             if time.monotonic() >= deadline:
                 raise TimeoutError('Decision cycle deadline exceeded')
+            if future.done():
+                return future.result()
             await self.n.pause(.01)
-        return future.result()
 
     async def execute(self, handle):
         n = self.n
@@ -128,6 +161,7 @@ class CycleNavigation:
             controller_attempted = False
             boundary = time.monotonic()
             task_epoch = None
+            terrain_stamp = -math.inf
             while not n.interrupted(task):
                 delay = boundary-time.monotonic()
                 if delay > 0:
@@ -137,6 +171,7 @@ class CycleNavigation:
                 boundary += (max(0, math.floor((started-boundary)/self.p['period_s']))+1)*self.p['period_s']
                 self.number += 1
                 timings = {}
+                handoff_started = False
                 try:
                     requests[:] = [r for r in requests if r not in results or not results[r].done()]
                     results = {r:f for r,f in results.items() if r in requests}
@@ -146,12 +181,14 @@ class CycleNavigation:
                         results.clear()
                         self.active_result, self.valid_until = None, -math.inf
                     state_started=time.monotonic()
-                    ros_now = n.get_clock().now().nanoseconds/1e9
-                    samples = [s for s in list(self.samples) if 0 <= ros_now-s['stamp_s'] < self.p['period_s']]
+                    ros_now, samples, observations = self.snapshot_inputs()
                     if any(not r.done() for r in requests):
                         raise ValueError('Previous controller acceptance is still pending')
-                    if not n.status(False)['ready'] or not samples:
-                        raise ValueError('Cycle requires fresh sensors and paired localization')
+                    status = n.status(False)
+                    if not status['ready']:
+                        raise ValueError('Cycle inputs not ready: '+', '.join(status.get('not_ready_reasons', ())))
+                    if not samples:
+                        raise SnapshotUnavailable('No fresh paired localization sample')
                     if task_epoch is not None and samples[-1]['epoch'] != task_epoch:
                         raise RuntimeError('Localization epoch changed; restart navigation task')
                     task_epoch = samples[-1]['epoch']
@@ -170,9 +207,9 @@ class CycleNavigation:
                             if not await n.release_controller(requests, results) or not await n.confirm_stop():
                                 raise RuntimeError('Could not confirm final stop')
                             # A GNSS correction during braking must not fabricate completion.
-                            final = self.samples[-1]
-                            if (final['epoch'] == task_epoch and n.status(False)['ready']
-                                    and 0 <= n.get_clock().now().nanoseconds/1e9-final['stamp_s'] < self.p['period_s']
+                            latest = self.paired_samples(n.get_clock().now().nanoseconds/1e9)
+                            final = latest[-1] if latest else None
+                            if (final is not None and final['epoch'] == task_epoch and n.status(False)['ready']
                                     and n.arrival_heading_ok(final['map_pose'],item['goal'])
                                     and math.hypot(*body_delta(queue.target,final['map_pose'])) <= final_tolerance):
                                 outcome = 'succeeded'
@@ -180,7 +217,12 @@ class CycleNavigation:
                     timings['state_and_hint_ms'] = (time.monotonic()-state_started)*1000
                     stage = time.monotonic()
                     if n.terrain is not None:
+                        was_climbing = n.terrain.result['phase'] == 'climb'
                         n.terrain.tick()
+                        if was_climbing != (n.terrain.result['phase'] == 'climb'):
+                            # Stair suppression changes only on a climb transition.
+                            terrain_stamp = n.get_clock().now().nanoseconds/1e9
+                            self.valid_until = -math.inf
                     motion_allowed = (n.gait_confirmed(n.tasks.snapshot(task, include_paths=False))
                                       and (n.terrain is None or n.terrain.result['motion_allowed']))
                     controller_id = n.controller_id()
@@ -196,42 +238,14 @@ class CycleNavigation:
                         results.clear()
                         timings['controller_release_ms'] = (time.monotonic()-stage_release)*1000
                     timings['fsm_ms'] = (time.monotonic()-stage)*1000
-                    stage = time.monotonic()
-                    # Acquire the first post-FSM processed observations. This prevents a
-                    # new terrain mode from consuming costs filtered under the old mode.
-                    observation_start = n.get_clock().now().nanoseconds/1e9
-                    while True:
-                        messages = ([self.scan] if n.config['lidar_enabled'] else []) + ([self.camera] if n.config['camera_enabled'] else [])
-                        if messages and all(m is not None and
-                            m.header.stamp.sec+m.header.stamp.nanosec/1e9 >= observation_start for m in messages):
-                            break
-                        if n.interrupted(task):
-                            raise InterruptedError('Canceled during sensor acquisition')
-                        if time.monotonic() >= boundary:
-                            raise TimeoutError('Post-FSM sensor acquisition exceeded cycle')
-                        await n.pause(.01)
-                    timings['sensor_wait_ms'] = (time.monotonic()-stage)*1000
-                    stage = time.monotonic()
-                    oldest, snapshot = self.grid(position, n.get_clock().now().nanoseconds/1e9)
-                    timings['fusion_ms'] = (time.monotonic()-stage)*1000
-                    ack_started = time.monotonic()
-                    self.pub.publish(snapshot)
-                    token = snapshot.header.stamp.sec*10**9+snapshot.header.stamp.nanosec
-                    while not any('global_costmap' in key and value == token
-                                  for key,value in self.acks.items()):
-                        if n.interrupted(task):
-                            raise InterruptedError('Canceled waiting for costmaps')
-                        if time.monotonic() >= boundary:
-                            raise TimeoutError('Costmap snapshot acknowledgment exceeded cycle')
-                        await n.pause(.01)
-                    timings['fusion_and_costmap_ms'] = (time.monotonic()-stage)*1000
-                    timings['costmap_wait_ms'] = (time.monotonic()-ack_started)*1000
                     if not motion_allowed:
                         # Alignment and gait handshakes intentionally make no
                         # translational progress and do not consume this budget.
                         budget.last_progress_s=time.monotonic()
                         controller_attempted=False
-                        self.valid_until = min(boundary,time.monotonic()+max(0.,oldest+self.p['period_s']-n.get_clock().now().nanoseconds/1e9))
+                        # Alignment uses the live local map. A blocked FSM does
+                        # not need to wait for a global planning map at all.
+                        self.valid_until = boundary
                         self.report = dict(enabled=True,ready=self.allowed(),cycle=self.number,
                                            action=n.terrain.result['phase'] if n.terrain is not None else 'gait_confirmation',timings_ms=timings,
                                            compute_ms=(time.monotonic()-started)*1000)
@@ -239,34 +253,55 @@ class CycleNavigation:
                         budget.planned(True,time.monotonic())
                         continue
                     stage = time.monotonic()
+                    oldest, snapshot = self.grid(position, ros_now, terrain_stamp, observations)
+                    timings['fusion_ms'] = (time.monotonic()-stage)*1000
+                    ack_started = time.monotonic()
+                    age = n.config['sensor_timeout_s']
+                    remaining = oldest+age-n.get_clock().now().nanoseconds/1e9
+                    deadline = min(boundary, ack_started+remaining)
+                    if ack_started >= deadline:
+                        raise TimeoutError('Planning snapshot expired during fusion')
+                    token = snapshot.header.stamp.sec*10**9+snapshot.header.stamp.nanosec
+                    self.global_ack = None
+                    self.pub.publish(snapshot)
+                    while self.global_ack != token:
+                        if n.interrupted(task):
+                            raise InterruptedError('Canceled waiting for planning costmap')
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError('Planning costmap did not apply the snapshot before expiry')
+                        await n.pause(.01)
+                    timings['fusion_and_costmap_ms'] = (time.monotonic()-stage)*1000
+                    timings['costmap_wait_ms'] = (time.monotonic()-ack_started)*1000
+                    stage = time.monotonic()
                     if controller_attempted and not budget.controller_ended(stage):
                         raise RuntimeError('No odom progress within controller_patience_s')
                     final_yaw = None
                     if queue.final and 'yaw' in item['goal']:
                         final_yaw = item['goal']['yaw'] + position['yaw'] - samples[-1]['map_pose']['yaw']
-                    path = await self.plan(position, hint, task, boundary, final_yaw)
+                    path = await self.plan(position, hint, task, deadline, final_yaw)
                     timings['planning_ms'] = (time.monotonic()-stage)*1000
                     stage = time.monotonic()
                     command = FollowPath.Goal()
                     command.path, command.controller_id = path, controller_id
                     command.goal_checker_id = 'goal_checker'
+                    handoff_started = True
                     pending = n.follow_client.send_goal_async(command)
                     requests.append(pending)
                     cycle_number = self.number
-                    def accepted(f, number=cycle_number, deadline=boundary):
+                    def accepted(f, number=cycle_number, deadline=deadline):
                         if not f.cancelled() and f.exception() is None:
                             h = f.result()
                             if h is not None and h.accepted and (n.interrupted(task) or number != self.number or time.monotonic() >= deadline):
                                 h.cancel_goal_async()
                     pending.add_done_callback(accepted)
-                    follower = await self.future(pending, task, boundary)
+                    follower = await self.future(pending, task, deadline)
                     if not follower.accepted:
                         raise ValueError('Controller rejected cycle path')
                     results[pending] = follower.get_result_async()
                     self.active_result = results[pending]
                     n.active_controller = command.controller_id
                     timings['controller_accept_ms'] = (time.monotonic()-stage)*1000
-                    remaining_age = oldest+self.p['period_s']-n.get_clock().now().nanoseconds/1e9
+                    remaining_age = oldest+age-n.get_clock().now().nanoseconds/1e9
                     if remaining_age <= 0:
                         raise TimeoutError('Planning snapshot expired before handoff')
                     # Allow the accepted path through the following refresh.
@@ -291,6 +326,16 @@ class CycleNavigation:
                     requests[:] = [r for r in requests if r not in results or not results[r].done()]
                     results = {r:f for r,f in results.items() if r in requests}
                 except (ValueError, TimeoutError) as exc:
+                    # A delayed planning refresh is not a new obstacle or a
+                    # lost source. Keep an already accepted path under the live
+                    # controller/watchdog gates, within its original deadline.
+                    can_retry = isinstance(exc, (SnapshotUnavailable, TimeoutError))
+                    if can_retry and not handoff_started and not n.stopping and self.allowed():
+                        self.report = dict(enabled=True, ready=True, cycle=self.number,
+                                           action='keep_active_path', reason=str(exc), timings_ms=timings,
+                                           compute_ms=(time.monotonic()-started)*1000)
+                        self.history.append(self.report)
+                        continue
                     self.valid_until = -math.inf
                     n.stopping = True
                     n.command_pub.publish(Twist())
@@ -334,13 +379,18 @@ class CycleNavigation:
             else:handle.abort()
         return NavigateToPose.Result()
 
-    def grid(self, position, now):
+    def grid(self, position, now, since=-math.inf, observations=None):
         n, lidar, camera, stamps = self.n, None, None, []
+        age = n.config['sensor_timeout_s']
+        if observations is None:
+            with self.input_lock:
+                observations = tuple(self.scans), self.camera
+        scans, camera_msg = observations
         if n.config['lidar_enabled']:
             scan, tf = None, None
-            for candidate in reversed(list(self.scans)):
-                stamp = candidate.header.stamp.sec+candidate.header.stamp.nanosec/1e9
-                if not 0 <= now-stamp < self.p['period_s']:
+            for candidate in reversed(scans):
+                stamp = acquisition_time(candidate)
+                if stamp < since or stamp > now or not healthy_scan(candidate, now, age):
                     continue
                 try:
                     tf = n.tf.lookup_transform('odom', candidate.header.frame_id,
@@ -350,8 +400,8 @@ class CycleNavigation:
                 scan = candidate
                 break
             if scan is None:
-                raise ValueError('Waiting for a fresh lidar snapshot with acquisition-time TF')
-            stamp = scan.header.stamp.sec+scan.header.stamp.nanosec/1e9
+                raise SnapshotUnavailable('Waiting for a fresh lidar snapshot with acquisition-time TF')
+            stamp = acquisition_time(scan)
             q,t = tf.transform.rotation,tf.transform.translation
             yaw = math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z))
             rays=[(yaw+scan.angle_min+i*scan.angle_increment,float(r)) for i,r in enumerate(scan.ranges)
@@ -359,15 +409,16 @@ class CycleNavigation:
             if not rays:raise ValueError('Lidar snapshot has no valid rays')
             lidar=((t.x,t.y),rays,scan.range_max);stamps.append(stamp)
         if n.config['camera_enabled']:
-            msg=self.camera
-            if msg is None or msg.header.frame_id!='odom':raise ValueError('Waiting for odom camera snapshot')
-            stamp=msg.header.stamp.sec+msg.header.stamp.nanosec/1e9
+            msg=camera_msg
+            if msg is None or msg.header.frame_id!='odom':
+                raise SnapshotUnavailable('Waiting for odom camera snapshot')
+            stamp=acquisition_time(msg)
             camera=(np.asarray(msg.data).reshape(msg.info.height,msg.info.width),
                     (msg.info.origin.position.x,msg.info.origin.position.y),msg.info.resolution)
             if not np.any(camera[0]>=0):raise ValueError('Camera snapshot contains no observations')
             stamps.append(stamp)
-        if not stamps or any(not 0<=now-s<self.p['period_s'] for s in stamps):
-            raise ValueError('Sensor snapshot older than one decision cycle')
+        if not stamps or any(s < since or not 0 <= now-s < age for s in stamps):
+            raise SnapshotUnavailable('No fresh obstacle snapshot for the current terrain mode')
         values,origin=fuse_grid((position['x'],position['y']),self.p['grid_resolution_m'],self.p['grid_half_width_m'],lidar,camera)
         msg=OccupancyGrid()
         msg.header.frame_id='odom';msg.header.stamp=n.get_clock().now().to_msg()

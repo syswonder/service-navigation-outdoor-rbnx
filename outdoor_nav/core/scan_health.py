@@ -3,8 +3,17 @@
 import math
 
 
+def acquisition_time(msg):
+    return msg.header.stamp.sec + msg.header.stamp.nanosec / 1e9
+
+
+def acquisition_monotonic(msg, now_s, monotonic_now):
+    """Preserve the age a sample already had when it reached this process."""
+    return monotonic_now - max(0., now_s-acquisition_time(msg))
+
+
 def healthy_scan(scan, now_s, timeout_s, allow_filtered_empty=False):
-    age = now_s - (scan.header.stamp.sec + scan.header.stamp.nanosec / 1e9)
+    age = now_s - acquisition_time(scan)
     if not (-0.1 <= age < timeout_s and scan.header.frame_id and scan.ranges):
         return False
     if not (

@@ -39,20 +39,22 @@ localization 的状态中必须包含 `navigation_sample`：schema_version=1、s
 
 ## 周期顺序与过期
 
-1. 截止边界前一个周期的定位样本，平均提示点并更新队列。
+1. 在同一截止时刻冻结配对定位样本、雷达缓存和相机代价图，平均提示点并更新队列。迟到的数据留给下一轮。
 2. 推进一次地形状态机。原高频状态机计时器在该模式下不再推进它。
-3. 等待状态机更新后新获取的已处理雷达/视觉观测，避免新状态使用旧状态过滤的障碍结果。
+3. 普通周期从快照中选择有采集时刻 TF 的最新雷达观测并读取相机代价图。上下楼控制阶段切换后，只接受切换之后采集的观测，下一轮检查数据是否就绪。
 4. 在 odom 生成单份融合图，等待规划器的 `global_costmap` 确认该快照。控制器的 `local_costmap` 按原频率继续接收观测。
 5. 请求一次新路径。地形和控制器允许继续行驶时，保留当前 FollowPath，由新目标接替它。对齐楼梯、切换控制器或等待步态确认时，先撤销当前路径并执行相应的状态机动作。
 
 只有启用的传感器参与等待。规划快照融合使用最大占据代价，未知不清除障碍、视觉可通行不覆盖雷达障碍。`global_costmap` 使用 odom 滚动窗口，只加载周期快照和膨胀层。`local_costmap` 保留部署原有的实时传感器层，供正在执行的控制任务检查障碍。
 
-正常周期刷新不发零速，也不主动取消当前路径。交接期间每条控制指令仍由实时观测时效和速度看门狗约束。原始传感器健康仍受 `sensor_timeout_s` 约束；周期快照不得超过 `period_s`，且不能通过改写时间戳延长有效期。遇到超时、数据缺失、控制目标结束或状态机要求停止时，运动输出关闭。连续失败沿用 `policy.planner_patience_s`，反复重规划且没有 odom 位移进展沿用 `policy.controller_patience_s`。底层控制器、速度平滑和停车看门狗维持原频率。
+正常周期刷新可在原有有效期内继续使用已获控制器接受的路径。若快照或对应 TF 迟到且仍有实时健康数据，也沿用该路径。启用的传感器失效、控制目标结束、定位重置、规划确认无可通行路径或状态机要求停止时，运动输出关闭。连续失败沿用 `policy.planner_patience_s`，反复重规划且没有 odom 位移进展沿用 `policy.controller_patience_s`。
+
+启用周期模式后，观测时效默认取 `decision_cycle.period_s`。显式设置的旧 `policy.sensor_timeout_s` 和启用地形时的 `terrain.observation_timeout_s` 仍可收紧时效，取其中最小值并用于相关检查和代价地图。常规部署可只设置周期。Nav2 的 `goal_checker.xy_goal_tolerance` 由参数文件提供，任务的 GNSS 到达容差更严时才临时收紧控制器容差。
 
 ## 诊断与测量
 
-状态中的 `decision_cycle` 报告周期编号、提示点、样本数、有效性和失败原因。时间单位均为 ms：controller_release_ms、state_and_hint_ms、fsm_ms、sensor_wait_ms、fusion_ms、costmap_wait_ms、fusion_and_costmap_ms、planning_ms、controller_accept_ms，以及总 compute_ms。
+状态中的 `decision_cycle` 报告周期编号、提示点、样本数、有效性和失败原因。耗时以 ms 记录，包括 controller_release_ms、state_and_hint_ms、fsm_ms、fusion_ms、costmap_wait_ms、fusion_and_costmap_ms、planning_ms、controller_accept_ms 和总 compute_ms。
 
-模型推理、原始点云投影和定位估计器在异步生产端运行；sensor_wait_ms 只代表等待新处理结果，不等于这些模块的独立计算时间。必须分别测量，不能将合成 scan/grid 测试称作实传感器全链路通过。测试脚本和设备测量报告保存在被忽略的 local_only/，不纳入 Git。
+模型推理、原始点云投影和定位估计器在异步生产端运行，其运行时长需要从各生产端采集。设备测量报告保存在被忽略的 local_only/。
 
 周期规划不再强制启用 terrain。无论是否开启地形监督，步态准备均通过共用的确认门；真实地形 FSM 仍在每个周期只推进一次。

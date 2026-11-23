@@ -28,7 +28,7 @@ from std_msgs.msg import String, UInt32
 from tf2_ros import Buffer, TransformListener
 
 from .configuration import load_runtime
-from .core.scan_health import healthy_scan
+from .core.scan_health import acquisition_monotonic, acquisition_time, healthy_scan
 from .core.gait import GaitSchedule, STAIRS, chassis_prepared
 from .core.scan_gate import stairs_obstacle_off
 from std_srvs.srv import Empty
@@ -437,21 +437,25 @@ class OutdoorExecutor(Executor):
             setattr(self, name, {})
 
     def on_scan(self, msg):
-        self.scan, self.scan_at = msg, time.monotonic()
-        if healthy_scan(
-            msg,
-            self.get_clock().now().nanoseconds / 1e9,
-            self.config["sensor_timeout_s"],
-        ):
-            self.mark("lidar")
+        now_s = self.get_clock().now().nanoseconds / 1e9
+        if not healthy_scan(msg, now_s, self.config["sensor_timeout_s"]):
+            return
+        if self.scan is not None and acquisition_time(msg) <= acquisition_time(self.scan):
+            return
+        self.scan = msg
+        self.scan_at = acquisition_monotonic(msg, now_s, time.monotonic())
+        self.stats["lidar"] = self.scan_at
 
     def on_camera_scan(self, msg):
         if not msg.header.frame_id:
             self.stats["camera"] = -math.inf
             return
-        if healthy_scan(msg, self.get_clock().now().nanoseconds / 1e9,
+        now_s = self.get_clock().now().nanoseconds / 1e9
+        if healthy_scan(msg, now_s,
                         self.config["sensor_timeout_s"], allow_filtered_empty=True):
-            self.mark("camera")
+            acquired = acquisition_monotonic(msg, now_s, time.monotonic())
+            self.stats["camera"] = max(self.stats.get("camera", -math.inf), acquired)
+
     def stairs_active(self):
         task = self.tasks.snapshot(self.owner, include_paths=False) if self.owner else None
         return stairs_obstacle_off(
@@ -637,17 +641,21 @@ class OutdoorExecutor(Executor):
         tolerance = self.tasks.snapshot(task_id)["arrival_tolerance_m"]
         if tolerance is None:
             raise RuntimeError("Task has no GNSS acceptance policy")
-        if not self.controller_parameters.service_is_ready():
-            raise RuntimeError("Controller parameter service is unavailable")
-        req = SetParametersAtomically.Request()
-        req.parameters = [
-            Parameter(
-                "goal_checker.xy_goal_tolerance", value=float(min(tolerance, 0.5))
-            ).to_parameter_msg()
-        ]
-        result = await self.result(self.controller_parameters.call_async(req), task_id)
-        if not result.result.successful:
-            raise RuntimeError("Controller rejected the task arrival tolerance")
+        configured = self.config["controller_goal_tolerance_m"]
+        effective = min(tolerance, configured)
+        if effective < configured or getattr(self, "controller_tolerance_overridden", False):
+            if not self.controller_parameters.service_is_ready():
+                raise RuntimeError("Controller parameter service is unavailable")
+            req = SetParametersAtomically.Request()
+            req.parameters = [
+                Parameter("goal_checker.xy_goal_tolerance", value=float(effective)).to_parameter_msg()
+            ]
+            # Keep restoration pending even when the request succeeds after our deadline.
+            self.controller_tolerance_overridden = True
+            result = await self.result(self.controller_parameters.call_async(req), task_id)
+            if not result.result.successful:
+                raise RuntimeError("Controller rejected the task arrival tolerance")
+            self.controller_tolerance_overridden = effective < configured
         if getattr(self, "terrain", None) is not None:
             self.terrain.prepared_task = task_id
 

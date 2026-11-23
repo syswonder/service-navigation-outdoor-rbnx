@@ -6,7 +6,7 @@ import time
 import signal
 from rclpy.signals import SignalHandlerOptions
 from .configuration import load_runtime
-from .core.scan_health import healthy_scan
+from .core.scan_health import acquisition_monotonic, healthy_scan
 
 import rclpy
 from geometry_msgs.msg import Twist
@@ -75,7 +75,7 @@ class Watchdog(Node):
     def scan(self, msg):
         now_s = self.get_clock().now().nanoseconds / 1e9
         if healthy_scan(msg, now_s, self.config["sensor_timeout_s"]):
-            self.scan_at = time.monotonic()
+            self.scan_at = max(self.scan_at, acquisition_monotonic(msg, now_s, time.monotonic()))
 
     def tick(self):
         now = time.monotonic()
@@ -124,9 +124,10 @@ class Watchdog(Node):
         if not msg.header.frame_id:
             self.camera_at = -math.inf
             return
-        if healthy_scan(msg, self.get_clock().now().nanoseconds / 1e9,
+        now_s = self.get_clock().now().nanoseconds / 1e9
+        if healthy_scan(msg, now_s,
                         self.config["sensor_timeout_s"], allow_filtered_empty=True):
-            self.camera_at = time.monotonic()
+            self.camera_at = max(self.camera_at, acquisition_monotonic(msg, now_s, time.monotonic()))
 
     def destroy_node(self):
         if rclpy.ok():
