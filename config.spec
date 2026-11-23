@@ -130,6 +130,22 @@ properties:
     additionalProperties: false
     description: Outdoor task acceptance, observation freshness, original camera calibration/filtering and commissioning confirmations. Nav2 tuning belongs in params_file.
     properties:
+      ranger_descent_enabled:
+        type: boolean
+        default: false
+        description: Require live Ranger ground support for continuous navigation.
+      ranger_step_limit_m:
+        type: number
+        default: 0.075
+      ranger_grade_limit_deg:
+        type: number
+        default: 15.0
+      ranger_brake_mps2:
+        type: number
+        default: 0.55
+      ranger_depth_timeout_s:
+        type: number
+        default: 0.35
       lidar_enabled:
         type: boolean
         default: true

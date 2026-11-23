@@ -92,3 +92,39 @@ def test_owner_conflict_can_clear_without_replaying_a_cached_command():
     count[0] = 1
     Watchdog.check_owners(n)
     assert not n.conflict and n.command_at == 0. and n.command.linear.x == 0.
+
+@pytest.mark.parametrize("depth_live", [True, False])
+def test_ranger_blocks_controller_even_when_original_map_is_free(depth_live):
+    import numpy as np
+    from outdoor_nav.core.ground_support import CELL, SIZE, SupportMask
+
+    n = fixture()
+    n.config.update(ranger_descent_enabled=True, ranger_depth_timeout_s=.35,
+                    ranger_brake_mps2=.55)
+    n.command.linear.x = .22
+    n.original_costmap = np.zeros((SIZE, SIZE), dtype=np.int8)
+    n.get_clock = lambda: S(now=lambda: S(nanoseconds=10_000_000_000))
+    n.speed_sample = (.22, 10., 10.)
+    n.support_tf = Mock()
+    support = SupportMask(np.zeros_like(n.original_costmap, dtype=bool), (-8., -8.), CELL, 10., .3)
+    valid = SupportMask(np.ones_like(n.original_costmap, dtype=bool), (-8., -8.), CELL, 10., .3)
+    feeds = [valid]
+    n.support = S(fresh=lambda: feeds[-1])
+    n.ranger_permits = lambda command, now: Watchdog.ranger_permits(n, command, now)
+    pose = S(transform=S(translation=S(x=0., y=0.), rotation=S(x=0., y=0., z=0., w=1.)))
+    with patch("outdoor_nav.guard.time.monotonic", return_value=10.), patch(
+        "outdoor_nav.ground_support_node.latest_base", return_value=pose
+    ):
+        Watchdog.tick(n)
+        assert n.pub.publish.call_args.args[0].linear.x == pytest.approx(.22)
+        feeds.append(support if depth_live else None)
+        for _ in range(10):
+            Watchdog.tick(n)
+            sent = n.pub.publish.call_args.args[0]
+            speed = max(sent.linear.x, n.speed_sample[0] - .55*.05)
+            n.speed_sample = (speed, 10., 10.)
+    sent = n.pub.publish.call_args.args[0]
+    assert n.speed_sample[0] == 0.
+    assert n.original_costmap[SIZE//2, SIZE//2] == 0
+    assert sent.linear.x == 0 and sent.angular.z == 0
+    assert n.command.linear.x == .22

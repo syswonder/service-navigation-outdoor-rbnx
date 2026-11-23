@@ -13,6 +13,7 @@ from geometry_msgs.msg import Twist
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
+from nav_msgs.msg import Odometry
 from std_msgs.msg import String
 
 
@@ -44,6 +45,15 @@ class Watchdog(Node):
         self.create_timer(0.05, self.tick)
         self.create_subscription(LaserScan, "/outdoor/camera_scan", self.camera_scan, qos_profile_sensor_data)
         self.create_timer(1.0, self.check_owners)
+        if self.config.get("ranger_descent_enabled", False):
+            from tf2_ros import Buffer, TransformListener
+            from .ground_support_node import SupportFeed
+            self.support_tf = Buffer()
+            self.support_listener = TransformListener(self.support_tf, self)
+            self.support = SupportFeed(self, self.config, self.support_tf)
+            self.speed_sample = None
+            self.support_epoch = None
+            self.create_subscription(Odometry, "/outdoor/odom", self.ranger_odometry, 10)
 
     def check_owners(self):
         conflict = self.count_publishers(self.pub.topic_name) > 1
@@ -69,6 +79,12 @@ class Watchdog(Node):
                 and data.get("extrinsics", {}).get("ready", False)
             )
             self.geo_at = time.monotonic()
+            if self.config.get("ranger_descent_enabled", False):
+                epoch = ((data.get("fusion") or {}).get("recovery_id"),
+                         (data.get("navigation_sample") or {}).get("epoch"))
+                if self.support_epoch is not None and self.support_epoch != epoch:
+                    self.support.invalidate()
+                self.support_epoch = epoch
         except (ValueError, KeyError):
             self.ready = False
 
@@ -76,6 +92,28 @@ class Watchdog(Node):
         now_s = self.get_clock().now().nanoseconds / 1e9
         if healthy_scan(msg, now_s, self.config["sensor_timeout_s"]):
             self.scan_at = time.monotonic()
+
+    def ranger_odometry(self, msg):
+        from .ground_support_node import seconds
+        self.speed_sample = (msg.twist.twist.linear.x, seconds(msg.header.stamp), time.monotonic())
+
+    def ranger_permits(self, command, now):
+        from tf2_ros import TransformException
+        from .ground_support_node import latest_base, xy_yaw
+        support = self.support.fresh()
+        feedback = self.speed_sample
+        timeout = self.config["ranger_depth_timeout_s"]
+        if support is None or feedback is None:
+            return False
+        speed, stamp, received = feedback
+        if now - received > timeout or not 0 <= self.get_clock().now().nanoseconds/1e9-stamp <= timeout:
+            return False
+        try:
+            pose = latest_base(self.support_tf, self, timeout)
+        except (TransformException, ValueError):
+            return False
+        xy, yaw = xy_yaw(pose)
+        return support.permits(xy, yaw, command.linear.x, command.angular.z, speed, self.config)
 
     def tick(self):
         now = time.monotonic()
@@ -106,6 +144,13 @@ class Watchdog(Node):
                 )
             else:
                 blockers.append("nonfinite_command")
+        if (self.config.get("ranger_descent_enabled", False) and not blockers
+                and (output.linear.x or output.angular.z) and not self.ranger_permits(output, now)):
+            blockers.append("ranger_ground_unconfirmed")
+            output = Twist()
+        if self.config.get("ranger_descent_enabled", False):
+            from .core.ground_support import SEGMENT_SPEED
+            output.linear.x = min(output.linear.x, SEGMENT_SPEED)
         self.pub.publish(output)
         self.status_pub.publish(
             String(
