@@ -36,19 +36,22 @@ class TerrainExecution:
         ready = chassis_prepared(body, now-n.chassis_at)
         stopped = (n.stationary_since is not None and now-n.stationary_since >= n.config['stop_hold_s']
                    and now-n.velocity_at < n.config['sensor_timeout_s'])
-        yaw = None
+        position = yaw = None
         try:
             tf = n.tf.lookup_transform('odom', 'base_link', Time())
             q = tf.transform.rotation
             stamp = tf.header.stamp.sec+tf.header.stamp.nanosec/1e9
             if i.fresh(stamp):
                 yaw = math.atan2(2*(q.w*q.z+q.x*q.y), 1-2*(q.y*q.y+q.z*q.z))
+                t = tf.transform.translation
+                if math.isfinite(t.x) and math.isfinite(t.y):
+                    position = t.x, t.y
         except Exception:
             pass
         self.observation = i.selected(i.machine.state)
         self.result = i.machine.tick(now, enable=enable,
             pitch=i.pitch if i.fresh(i.pitch_stamp) else None,
-            observation=self.observation, yaw=yaw,
+            observation=self.observation, yaw=yaw, position=position,
             actual_gait=body.get('gait'), gait_fresh=fresh, gait_ready=ready, stopped=stopped)
         self.at = now
         request = self.result['gait_request']

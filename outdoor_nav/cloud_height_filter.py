@@ -1,15 +1,15 @@
 """Acquisition-time base-frame height envelope, then local terrain arbitration."""
 import copy
 import sys
+from collections import deque
 import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.time import Time
-from rclpy.duration import Duration
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
-from tf2_ros import Buffer, TransformListener
+from tf2_ros import Buffer, TransformException, TransformListener
 from .configuration import load_runtime
 from .terrain_inputs import TerrainInputs, rotation
 from .core.terrain_geometry import height_keep, suppress_stair_points
@@ -30,21 +30,51 @@ class CloudHeightFilter(Node):
         self.listener = TransformListener(self.tf, self)
         self.inputs = TerrainInputs(self, runtime) if self.p['enabled'] else None
         self.timeout = runtime['policy']['sensor_timeout_s']
+        self.pending = deque(maxlen=12)
+        self.last_stamp = self.last_now = 0.
         self.pub = self.create_publisher(PointCloud2, runtime['topic_remap']['filtered_cloud'], 10)
         self.create_subscription(PointCloud2, runtime['topic_remap']['cloud'], self.receive, qos_profile_sensor_data)
+        self.create_timer(.02, self.process_ready)
 
     def receive(self, msg):
+        stamp = msg.header.stamp.sec+msg.header.stamp.nanosec/1e9
+        if msg.header.frame_id and stamp > 0:
+            self.pending.append((stamp, msg))
+
+    def process_ready(self):
+        now = self.get_clock().now().nanoseconds/1e9
+        if now < self.last_now:
+            self.pending.clear()
+            self.last_stamp = 0.
+        self.last_now = now
+        self.pending = deque(((stamp, msg) for stamp, msg in self.pending
+                              if stamp > self.last_stamp and now-stamp < self.timeout), maxlen=self.pending.maxlen)
+        obs, state = self.inputs.suppression_context() if self.inputs else (None, {})
+        suppress = obs and obs.get('stairs') and state.get('phase') == 'climb'
+        # Let this node's TF callbacks catch up instead of blocking them in receive().
+        for stamp, msg in sorted(self.pending, key=lambda item: item[0], reverse=True):
+            if stamp > now:
+                continue
+            try:
+                at = Time.from_msg(msg.header.stamp)
+                frame = msg.header.frame_id
+                base_tf = self.tf.lookup_transform('base_link', frame, at) if frame != 'base_link' else None
+                odom_tf = self.tf.lookup_transform('odom', 'base_link', at) if suppress else None
+            except TransformException:
+                continue
+            self.last_stamp = stamp
+            self.filter_cloud(msg, base_tf, odom_tf, obs, state)
+            break
+
+    def filter_cloud(self, msg, base_tf, odom_tf, obs, state):
         try:
-            stamp = msg.header.stamp.sec+msg.header.stamp.nanosec/1e9
-            if not msg.header.frame_id or not 0 < stamp <= self.get_clock().now().nanoseconds/1e9 or self.get_clock().now().nanoseconds/1e9-stamp >= self.timeout:
-                return
             values = point_cloud2.read_points(msg, field_names=('x', 'y', 'z'), skip_nans=True)
             points = np.column_stack([values[n] for n in ('x', 'y', 'z')]).reshape(-1, 3)
+            points = points[np.isfinite(points).all(axis=1)]
             if not len(points):
                 return  # Empty raw input cannot certify free space.
-            if msg.header.frame_id != 'base_link':
-                tf = self.tf.lookup_transform('base_link', msg.header.frame_id, Time.from_msg(msg.header.stamp), timeout=Duration(seconds=.05))
-                points = apply(points, tf)
+            if base_tf is not None:
+                points = apply(points, base_tf)
             if self.p['slope_filter_enabled'] and self.p['lidar_slope_enabled']:
                 keep = height_keep(points, self.p)
             elif self.projection.get('fixed_height', False):
@@ -58,12 +88,9 @@ class CloudHeightFilter(Node):
                     p['cloud_min_height_far_m'], ceiling, -self.p['ground_z_m'])
                 keep = filter_xyz(*points.T, near, far, p['cloud_height_ramp_m'], ceiling)
             points = points[keep]
-            if self.inputs and len(points):
-                obs, state = self.inputs.suppression_context()
-                if obs and state.get('phase') == 'climb':
-                    tf = self.tf.lookup_transform('odom', 'base_link', Time.from_msg(msg.header.stamp), timeout=Duration(seconds=.05))
-                    remove = suppress_stair_points(apply(points, tf), obs, state, 'lidar_obstacles', self.p)
-                    points = points[~remove]
+            if odom_tf is not None and len(points):
+                remove = suppress_stair_points(apply(points, odom_tf), obs, state, 'lidar_obstacles', self.p)
+                points = points[~remove]
             header = copy.deepcopy(msg.header)
             header.frame_id = 'base_link'
             self.pub.publish(point_cloud2.create_cloud_xyz32(header, points.astype(np.float32)))

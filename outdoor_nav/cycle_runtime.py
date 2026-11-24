@@ -199,7 +199,8 @@ class CycleNavigation:
                         hint = average_hint(queue.target, samples)
                     x,y = body_delta(hint, position)
                     final_tolerance = item['arrival_tolerance_m']
-                    if queue.final and math.hypot(x,y) <= final_tolerance:
+                    on_stairs = n.terrain is not None and n.terrain.result['state'] == 'stairs_up'
+                    if not on_stairs and queue.final and math.hypot(x,y) <= final_tolerance:
                         actual = body_delta(queue.target, samples[-1]['map_pose'])
                         if math.hypot(*actual) <= final_tolerance and n.arrival_heading_ok(samples[-1]['map_pose'],item['goal']):
                             self.valid_until = -math.inf
@@ -217,8 +218,11 @@ class CycleNavigation:
                     timings['state_and_hint_ms'] = (time.monotonic()-state_started)*1000
                     stage = time.monotonic()
                     if n.terrain is not None:
-                        was_climbing = n.terrain.result['phase'] == 'climb'
-                        n.terrain.tick()
+                        with n.state_lock:
+                            was_climbing = n.terrain.result['phase'] == 'climb'
+                            n.terrain.tick()
+                        if n.terrain.result['failed']:
+                            raise RuntimeError('Terrain supervisor stopped: ' + n.terrain.result['reason'])
                         if was_climbing != (n.terrain.result['phase'] == 'climb'):
                             # Stair suppression changes only on a climb transition.
                             terrain_stamp = n.get_clock().now().nanoseconds/1e9

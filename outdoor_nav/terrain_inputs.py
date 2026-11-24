@@ -21,6 +21,9 @@ class TerrainInputs:
     def __init__(self, node, runtime, control=False):
         self.node, self.p, self.t = node, runtime['terrain'], runtime['topic_remap']
         self.observations, self.state = {}, {}
+        cycle = runtime.get('decision_cycle', {})
+        self.state_timeout = max(self.p['observation_timeout_s'],
+                                 cycle['period_s'] if cycle.get('enabled') else 0.)
         self.pitch, self.pitch_stamp = None, -math.inf
         self.visual_required = runtime['policy']['camera_enabled'] and runtime['semantic_segmentation']['enabled'] and bool(self.p['stairs_classes'])
         self.sources = []
@@ -39,8 +42,10 @@ class TerrainInputs:
     def now(self):
         return self.node.get_clock().now().nanoseconds/1e9
 
-    def fresh(self, stamp):
-        return type(stamp) in (int, float) and math.isfinite(stamp) and 0 < stamp <= self.now() and self.now()-stamp < self.p['observation_timeout_s']
+    def fresh(self, stamp, timeout=None):
+        now = self.now()
+        age = self.p['observation_timeout_s'] if timeout is None else timeout
+        return type(stamp) in (int, float) and math.isfinite(stamp) and 0 < stamp <= now and now-stamp < age
 
     def receive(self, msg, source):
         if source not in {s for s, _ in self.sources}:
@@ -56,11 +61,19 @@ class TerrainInputs:
                 return
             points = np.asarray(value.get('points', []), float).reshape(-1, 3)
             heading = value.get('heading_yaw')
+            front_m = value.get('front_m')
             if (len(points) > 4096 or not np.isfinite(points).all()
                     or type(value.get('stairs')) is not bool
                     or value.get('direction') not in ('up', 'unknown')
+                    or (front_m is not None and (type(front_m) not in (int, float) or not math.isfinite(front_m) or front_m < 0))
                     or (heading is not None and (type(heading) not in (int, float) or not math.isfinite(heading)))):
                 raise ValueError('Invalid terrain payload')
+            bounds = value.get('flight_bounds')
+            if bounds is not None and (not isinstance(bounds, dict)
+                    or any(not isinstance(xy, list) or len(xy) != 2
+                           or any(type(v) not in (int, float) or not math.isfinite(v) for v in xy)
+                           for xy in (bounds.get('front_xy'), bounds.get('end_xy')))):
+                raise ValueError('Invalid stair flight bounds')
             self.observations[source] = {**value, 'source': source}
         except (ValueError, TypeError, KeyError):
             self.observations.pop(source, None)
@@ -80,12 +93,12 @@ class TerrainInputs:
     def state_message(self, msg):
         try:
             value = json.loads(msg.data)
-            self.state = value if isinstance(value, dict) and self.fresh(value.get('stamp')) else {}
+            self.state = value if isinstance(value, dict) and self.fresh(value.get('stamp'), self.state_timeout) else {}
         except (ValueError, TypeError):
             self.state = {}
 
     def suppression_context(self):
-        state = self.state if self.fresh(self.state.get('stamp')) else {}
+        state = self.state if self.fresh(self.state.get('stamp'), self.state_timeout) else {}
         return self.selected(state.get('state')), state
 
     def imu(self, msg):

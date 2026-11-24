@@ -391,7 +391,7 @@ class OutdoorExecutor(Executor):
                 was_stopping = True
                 continue
             if getattr(self, "terrain", None) is not None:
-                if self.terrain.result["failed"]:
+                if self.terrain.task_id == task_id and self.terrain.result["failed"]:
                     raise RuntimeError("Terrain supervisor stopped: " + self.terrain.result["reason"])
                 return position
             self.gait_tick()

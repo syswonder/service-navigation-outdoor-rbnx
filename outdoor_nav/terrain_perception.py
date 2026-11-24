@@ -17,7 +17,7 @@ from sensor_sanity_checker.images import ImageDecoder
 from semantic_local_grid.geometry import transform
 from semantic_local_grid.ros_utils import matrix_from_tf, seconds
 from .configuration import load_runtime
-from .core.terrain_geometry import forward_mask, stair_heading
+from .core.terrain_geometry import forward_mask, nearest_stair_flight
 
 
 class TerrainPerception(Node):
@@ -102,13 +102,18 @@ class TerrainPerception(Node):
             if np.count_nonzero(valid) < self.p['min_stair_points']:
                 raise ValueError('Insufficient classified depth in forward terrain ROI')
             points = base[valid & np.isin(labels.ravel(), self.ids)]
-            result.update(stair_heading(points, self.p))
             result['front_m'] = float(np.min(np.linalg.norm(points[:, :2], axis=1))) if len(points) else None
+            fit, points = nearest_stair_flight(points, self.p)
+            result.update(fit)
             matrix = matrix_from_tf(odom_tf)
             if result['heading_yaw'] is not None:
                 a = result['heading_yaw']
                 normal = matrix[:3, :3] @ np.array([np.cos(a), np.sin(a), 0.])
                 result['heading_yaw'] = float(np.arctan2(normal[1], normal[0]))
+                bounds = result['flight_bounds']
+                ends = np.array([bounds[key]+[self.p['ground_z_m']] for key in ('front_xy', 'end_xy')])
+                projected = transform(ends, matrix)[:, :2].tolist()
+                result['flight_bounds'] = dict(zip(('front_xy', 'end_xy'), projected))
             # One sample per 5 cm voxel, bounded transport; do not send full RGB-D frames.
             if len(points):
                 _, ids = np.unique(np.floor(points/.05).astype(int), axis=0, return_index=True)

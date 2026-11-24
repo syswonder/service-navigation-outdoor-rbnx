@@ -506,6 +506,10 @@ properties:
         type: number
         default: 1.2
         description: Stop flat-gait approach inside this nearest visible stair-point range until alignment and gait confirmation.
+      stair_landing_gap_m:
+        type: number
+        default: 0.45
+        description: Minimum observed gap between stair flights for a landing handoff.
       alignment_tolerance_deg:
         type: number
         default: 6.0

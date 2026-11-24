@@ -12,7 +12,7 @@ DEFAULTS = dict(
     confirm_s=.5, clear_s=.8, observation_timeout_s=1.,
     roi_half_width_m=.8, min_stair_points=20, min_stair_rise_m=.08,
     min_stair_width_m=.35,
-    stair_enter_range_m=1.2,
+    stair_enter_range_m=1.2, stair_landing_gap_m=.45,
     alignment_tolerance_deg=6., alignment_speed_rps=.15, alignment_kp=.8,
     alignment_timeout_s=20., stairs_speed_mps=.15, semantic_match_radius_m=.12,
     flat_gait_code=None, upstairs_gait_code=None,
