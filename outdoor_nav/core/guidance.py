@@ -195,13 +195,17 @@ class RouteGuidance:
         self.bends = set(self.points.indices[1:])
         self.index = min(1, len(self.points) - 1)
         self.skipped = set()
+        self.adjusted = {}
 
     @property
     def final_leg(self):
         return self.index == len(self.points) - 1
 
     def remaining_length(self, position):
-        return distance(position, self.points[self.index]) + self.points.remaining_length(self.index)
+        return distance(position, self.target(self.index)) + self.points.remaining_length(self.index)
+
+    def target(self, index):
+        return self.adjusted.get(index, self.points[index])
 
     def window(self, position):
         """Return an ordered ~6 m horizon and its identity for preemption.
@@ -214,16 +218,17 @@ class RouteGuidance:
             if self.index in self.skipped:
                 self.index += 1
                 continue
-            a, b = self.points[self.index - 1 : self.index + 1]
+            a, b = self.target(self.index - 1), self.target(self.index)
             dx, dy = b["x"] - a["x"], b["y"] - a["y"]
             px, py = position["x"] - b["x"], position["y"] - b["y"]
             crossed = px * dx + py * dy >= 0
-            lateral = abs(px * dy - py * dx) / math.hypot(dx, dy)
-            turned = entered_next_segment(position, a, b, self.points[self.index + 1])
+            length = math.hypot(dx, dy)
+            lateral = abs(px * dy - py * dx) / length if length else distance(position, b)
+            turned = entered_next_segment(position, a, b, self.target(self.index + 1))
             if distance(position, b) > 0.6 and not (crossed and lateral <= 1.5) and not turned:
                 break
             self.index += 1
-        end, ahead = self.index, distance(position, self.points[self.index])
+        end, ahead = self.index, distance(position, self.target(self.index))
         # Bound per-replan action calls even for extremely tightly spaced bends.
         while end + 1 < len(self.points) and end - self.index < 11:
             segment = distance(self.points[end], self.points[end + 1])

@@ -530,6 +530,17 @@ class Executor(Node):
         return True
 
     async def guided_path(self, guidance, window, position, task_id):
+        # Straight-road samples track progress, but forcing a path through each
+        # of them pulls the robot back to the reference line between obstacles.
+        sparse_window = tuple(
+            index for index in window if index in guidance.bends or index == window[-1]
+        )
+        path = await self.plan_guided_window(guidance, sparse_window, position, task_id)
+        if path is None and sparse_window != window:
+            path = await self.plan_guided_window(guidance, window, position, task_id)
+        return path
+
+    async def plan_guided_window(self, guidance, window, position, task_id):
         """Join sensor-costmap NavFn legs into one continuous controller path.
 
         Explicit starts prevent every leg from being planned from the robot.
@@ -540,10 +551,13 @@ class Executor(Node):
         path.header.frame_id = "map"
         path.header.stamp = self.get_clock().now().to_msg()
         start = validate_point(position)
+        goal_tolerance = self.config.get("controller_goal_tolerance_m", 0.5)
         window = list(window)
         skipped = set()
+        confirmed_skips = set()
         for offset, index in enumerate(window):
-            point = guidance.points[index]
+            reference = guidance.points[index]
+            point = reference
             if index != len(guidance.points) - 1:
                 point = free_via_point(point, self.global_map)
             request = ComputePathToPose.Goal()
@@ -573,7 +587,17 @@ class Executor(Node):
             if self.hardware and guidance.final_leg and len(leg) == 1:
                 # A coincident destination still needs a path for final heading alignment.
                 leg = [request.start, *leg]
-            if result.status != GoalStatus.STATUS_SUCCEEDED or len(leg) < 2:
+            usable = result.status == GoalStatus.STATUS_SUCCEEDED and len(leg) >= 2
+            if usable and index < len(guidance.points) - 1:
+                end = leg[-1].pose.position
+                # A temporary endpoint already inside the goal checker cannot
+                # advance the robot. Straight samples must also advance along
+                # their own ordered segment, even when shifted off the road.
+                inside_goal = math.hypot(end.x-position["x"], end.y-position["y"]) <= goal_tolerance
+                forward = ((end.x-start["x"])*(reference["x"]-previous["x"])
+                           + (end.y-start["y"])*(reference["y"]-previous["y"]))
+                usable = not inside_goal and (index in guidance.bends or forward > 0)
+            if not usable:
                 now_s = self.get_clock().now().nanoseconds / 1e9
                 if (index < len(guidance.points)-1
                         and self.scan is not None
@@ -585,8 +609,8 @@ class Executor(Node):
                     if (len(window) < 12
                             and math.hypot(next_point['x']-position['x'],
                                            next_point['y']-position['y']) <= 6.0):
-                        if offset+1 == len(window):
-                            window.append(next_index)
+                        if offset + 1 == len(window) or next_index < window[offset + 1]:
+                            window.insert(offset + 1, next_index)
                         skipped.add(index)
                         continue
                 # A sampled station may itself be occupied. Try the next station
@@ -601,9 +625,15 @@ class Executor(Node):
                         <= 4.1
                     ):
                         continue
-                self.planner_failure = ("Planner returned status %s with %s poses at via %s (%.2f, %.2f)"
-                                        % (result.status, len(leg), index, point['x'], point['y']))
-                return None
+                self.planner_failure = (
+                    f"No advancing path at via {index} ({point['x']:.2f}, {point['y']:.2f}); "
+                    f"planner status {result.status}, {len(leg)} poses"
+                )
+                # An unreachable later station does not invalidate the part
+                # already planned. Follow it and retry from a closer position.
+                if not path.poses:
+                    return None
+                break
             # NavFn tolerance can end a leg near (not exactly on) a via point.
             # Start the next leg at its ACTUAL end to avoid a disconnected join.
             if path.poses:
@@ -612,10 +642,16 @@ class Executor(Node):
                 path.poses.extend(leg)
             end = path.poses[-1].pose.position
             start = {"x": end.x, "y": end.y}
+            if point != reference:
+                guidance.adjusted[index] = start
+            else:
+                guidance.adjusted.pop(index, None)
+            confirmed_skips.update(skipped)
+            skipped.clear()
         # Intermediate leg-end orientations must not make the controller stop.
         # Commit skipped stations only after a complete obstacle-aware path
         # to a later station succeeds; a failed detour must not advance progress.
-        guidance.skipped.update(skipped)
+        guidance.skipped.update(confirmed_skips)
         for a, b in zip(path.poses, path.poses[1:]):
             heading = math.atan2(
                 b.pose.position.y - a.pose.position.y,

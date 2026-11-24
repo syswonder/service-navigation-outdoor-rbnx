@@ -49,9 +49,23 @@ def test_planner_and_terrain_switches_are_independent(tmp_path, cycle, terrain):
                             terrain={'enabled': terrain}, decision_cycle={'enabled': cycle}))
     assert runtime['decision_cycle']['enabled'] == cycle
     assert runtime['terrain']['enabled'] == terrain
-    assert runtime['policy']['sensor_timeout_s'] == 1.
+    assert runtime['policy']['sensor_timeout_s'] == (2. if cycle else 1.)
     assert runtime['policy']['lidar_height_m'] == .27
     assert runtime['policy']['pose_timeout_s'] == runtime['policy']['localization_timeout_s']
+
+
+def test_decision_cycle_uses_one_perception_lifetime(tmp_path):
+    ground = tmp_path/'ground.local.json'
+    ground.write_text(json.dumps({'ground_z_m': -.27}))
+    runtime = validate(dict(params_file=str(ROOT/'config/nav2_params.example.yml'),
+                            ground_height_file=str(ground),
+                            policy={'camera_enabled': True, 'sensor_timeout_s': 1.5},
+                            terrain={'enabled': True, 'observation_timeout_s': 1.25},
+                            decision_cycle={'enabled': True, 'period_s': 2.}))
+    assert runtime['decision_cycle']['period_s'] == 2.
+    assert runtime['policy']['sensor_timeout_s'] == runtime['terrain']['observation_timeout_s'] == 1.25
+    for name, layer in (('local_costmap', 'camera_layer'), ('global_costmap', 'cycle_layer')):
+        assert runtime['nav2_params'][name][name]['ros__parameters'][layer]['max_age_s'] == 1.25
 
 
 @pytest.mark.parametrize('cycle', [False, True])
