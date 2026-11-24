@@ -11,14 +11,14 @@ from std_msgs.msg import String
 from tf2_ros import TransformException
 
 from .core.descent import Survey
-from .core.ground_support import ACK_TOPIC, FRAME, SEGMENT_SPEED
+from .core.ground_support import ACK_TOPIC, FRAME
 from .ground_support_node import SupportFeed, latest_base, xy_yaw
 
 
 class RangerDescent:
     def __init__(self, node):
         self.node = node
-        self.feed = SupportFeed(node, node.config, node.tf)
+        self.feed = SupportFeed(node, node.config, node.tf, with_heights=True)
         self.turn = 0.
         self.ack = None
         node.create_subscription(String, ACK_TOPIC, self.on_ack, 10)
@@ -31,7 +31,10 @@ class RangerDescent:
             except ValueError:
                 self.ack = None
 
-    async def wait_support(self, task, timeout):
+    def report(self, reason, xy, target=None, detail=""):
+        self.node.get_logger().info(f"Ranger {reason} pose={xy} target={target} {detail}")
+
+    async def wait_support(self, task, timeout, *, need_heights=False):
         node = self.node
         deadline = time.monotonic() + timeout
         while True:
@@ -40,10 +43,21 @@ class RangerDescent:
             sample = self.feed.fresh()
             if sample is not None:
                 try:
-                    return sample, self.pose()
+                    pose = self.pose()
+                    if not need_heights:
+                        return sample, pose
+                    heights = self.feed.elevation(sample)
+                    xy, _ = pose
+                    if heights is not None and sample.clear([xy]):
+                        x, y = ((point-origin)//sample.resolution
+                                for point, origin in zip(xy, sample.origin))
+                        height = float(heights[int(y), int(x)])
+                        if math.isfinite(height):
+                            return sample, heights, xy, height
                 except (TransformException, ValueError):
                     pass
             if time.monotonic() >= deadline:
+                self.report("ground_support_insufficient", None, detail="fresh observation or pose unavailable")
                 raise RuntimeError("Ranger depth or support data lost; stopped")
             await node.pause(.05)
 
@@ -94,19 +108,22 @@ class RangerDescent:
         pose.pose.orientation.z, pose.pose.orientation.w = math.sin(yaw/2), math.cos(yaw/2)
         return pose
 
-    async def path(self, task, xy, target, final_yaw):
+    async def path(self, task, xy, target, final_yaw, phase, platform_z):
         node = self.node
         sample = self.feed.fresh()
-        if sample is None:
+        if sample is None or not sample.clear([xy, target]):
+            self.report("ground_support_insufficient", xy, target, "start or target unsupported")
             return None
         requested_stamp = sample.stamp
         deadline = time.monotonic() + .6
         while self.ack is None or self.ack < requested_stamp:
             if time.monotonic() >= deadline:
+                self.report("navfn_no_path", xy, target, "costmap did not acknowledge current support")
                 return None
             if node.interrupted(task):
                 raise InterruptedError("Ranger planning canceled")
             if self.feed.fresh() is None:
+                self.report("ground_support_insufficient", xy, target, "support expired awaiting costmap")
                 return None
             await node.pause(.05)
         request = ComputePathToPose.Goal()
@@ -119,23 +136,43 @@ class RangerDescent:
         request.planner_id = "GridBased"
         handle = await node.result(node.path_client.send_goal_async(request), task, timeout=3.)
         if not handle.accepted:
+            self.report("navfn_no_path", xy, target, "planner rejected the request")
             return None
         try:
             result = await node.result(handle.get_result_async(), task, timeout=3.)
+        except (TimeoutError, RuntimeError) as exc:
+            handle.cancel_goal_async()
+            self.report("navfn_no_path", xy, target, str(exc))
+            return None
         except BaseException:
             handle.cancel_goal_async()
             raise
         path = result.result.path
         if result.status != GoalStatus.STATUS_SUCCEEDED or len(path.poses) < 2:
+            self.report("navfn_no_path", xy, target, f"status={result.status} poses={len(path.poses)}")
             return None
         points = [self.transform(FRAME, path.header.frame_id,
                                  (pose.pose.position.x, pose.pose.position.y)) for pose in path.poses]
-        sample = self.feed.fresh()
-        if sample is None or math.dist(points[-1], target) > .2 or not sample.corridor(xy, points):
+        if math.dist(points[-1], target) > .2:
+            self.report("path_recheck_failed", xy, target, "NavFn endpoint missed the candidate")
+            return None
+        if not self.route_supported(self.feed.fresh(), xy, points, phase, platform_z):
+            self.report("path_recheck_failed", xy, target, "returned path lacks current support or leaves the platform")
             return None
         return path, points
 
-    async def follow(self, task, path, points, requests, results):
+    def route_supported(self, sample, xy, points, phase, platform_z):
+        if sample is None:
+            return False
+        allowed = None
+        if phase == "platform":
+            heights = self.feed.elevation(sample)
+            if heights is None:
+                return False
+            allowed = Survey.platform(heights, platform_z)
+        return sample.corridor(xy, points, allowed)
+
+    async def follow(self, task, path, points, requests, results, phase, platform_z):
         node = self.node
         sample, (xy, yaw) = await self.wait_support(task, 1.25)
         ahead = next((point for point in points if math.dist(xy, point) >= .30), points[-1])
@@ -145,8 +182,10 @@ class RangerDescent:
             await self.observe(task, angle)
             sample, (xy, yaw) = await self.wait_support(task, 1.25)
             if abs(math.remainder(heading-yaw, math.tau)) > .55:
+                self.report("tracking_aborted", xy, points[-1], "could not align at a stop")
                 return False
-        if not sample.corridor(xy, points):
+        if not self.route_supported(sample, xy, points, phase, platform_z):
+            self.report("path_recheck_failed", xy, points[-1], "path changed before tracking")
             return False
         command = FollowPath.Goal()
         command.path, command.controller_id, command.goal_checker_id = path, "FollowPath", "goal_checker"
@@ -155,32 +194,47 @@ class RangerDescent:
         requests.append(pending)
         follower = await node.result(pending, task, timeout=3.)
         if not follower.accepted:
+            self.report("tracking_aborted", xy, points[-1], "controller rejected the path")
             return False
         result = follower.get_result_async()
         results[pending] = result
         revision = node.tasks.snapshot(task, include_paths=False)["path_revision"] + 1
-        node.tasks.update(task, state="navigating", reason="Ranger confirmed segment", path_revision=revision,
+        node.tasks.update(task, state="navigating", reason=f"Ranger {phase} segment", path_revision=revision,
                           execution_path=[{"x": p.pose.position.x, "y": p.pose.position.y}
                                           for p in path.poses])
         node.path_pub.publish(path)
         node.stopping = False
         deadline = time.monotonic() + 32.
+        abort_reason = None
         try:
             while not result.done() and time.monotonic() < deadline:
                 if node.interrupted(task):
                     raise InterruptedError("Ranger segment canceled")
                 sample = self.feed.fresh()
                 if sample is None:
+                    abort_reason = "ground_support_insufficient: support expired in motion"
                     break
                 try:
                     xy, _ = self.pose()
                 except (TransformException, ValueError):
+                    abort_reason = "ground_support_insufficient: pose unavailable in motion"
                     break
                 index = min(range(len(points)), key=lambda i: math.dist(xy, points[i]))
-                if node.stopping or not sample.corridor(xy, points[index:]):
+                if node.stopping:
+                    abort_reason = "execution requested a stop"
+                    break
+                if phase == "platform" and self.feed.elevation(sample) is None:
+                    # DDS can deliver the two messages in either order. The
+                    # mask still protects motion until the matching heights arrive.
+                    if sample.corridor(xy, points[index:]):
+                        await node.pause(.05)
+                        continue
+                if not self.route_supported(sample, xy, points[index:], phase, platform_z):
+                    abort_reason = "path_recheck_failed: remaining corridor lost support"
                     break
                 await node.pause(.08)
         finally:
+            completed = result.done()
             node.stopping = True
             node.command_pub.publish(Twist())
             if not await node.release_controller(requests, results) or not await node.confirm_stop():
@@ -188,14 +242,20 @@ class RangerDescent:
         status = result.result().status
         requests.clear()
         results.clear()
-        return status == GoalStatus.STATUS_SUCCEEDED
+        if status == GoalStatus.STATUS_SUCCEEDED:
+            self.report("segment_completed", xy, points[-1], phase)
+            return True
+        self.report("tracking_aborted", xy, points[-1], f"{phase}: {abort_reason or ('controller ended the segment' if completed else 'segment time limit')}, status={status}")
+        return False
 
     async def run(self, task, goal, guidance, tolerance, requests, results):
         node = self.node
         survey = Survey()
         deadline = time.monotonic() + 225.
-        await self.wait_support(task, node.config["navigation_recovery_timeout_s"])
-        needs_observation = False
+        _, _, _, platform_z = await self.wait_support(
+            task, node.config["navigation_recovery_timeout_s"], need_heights=True
+        )
+        scan_angle = None
         consecutive_failures = 0
         while time.monotonic() < deadline and len(survey.visited) < 18 and consecutive_failures < 8:
             position = await node.wait_for_ready_pose(task)
@@ -212,38 +272,43 @@ class RangerDescent:
                         and node.arrival_heading_ok(position, goal)):
                     return position
             node.tasks.update(task, state="planning", reason="Ranger observing confirmed ground")
-            _, (xy, _) = await self.wait_support(task, 1.25)
+            if scan_angle is not None:
+                await self.observe(task, scan_angle)
+                scan_angle = None
+            support, heights, xy, ground_z = await self.wait_support(task, 1.25, need_heights=True)
             final_index = len(guidance.points) - 1
             bend = min((i for i in guidance.bends if i >= guidance.index), default=final_index)
             destination = guidance.target(bend)
             objective = self.transform(FRAME, "map", (destination["x"], destination["y"]))
             survey.moved(xy)
-            if needs_observation:
-                await self.observe(task, math.radians(25))
-                needs_observation = False
-            support, (xy, _) = await self.wait_support(task, 1.25)
-            candidates = survey.candidates(support, xy, objective)
+            candidates = survey.staged_candidates(support, heights, xy, objective, platform_z, ground_z)
+            if not candidates:
+                self.report("ground_support_insufficient", xy, detail=f"no eligible staged target ground_z={ground_z:.3f}")
             selected = None
-            for target in candidates:
+            for phase, target in candidates:
                 planned = await self.path(task, xy, target,
-                                          goal.get("yaw") if target == objective and bend == final_index else None)
+                                          goal.get("yaw") if target == objective and bend == final_index else None,
+                                          phase, platform_z)
                 if planned:
-                    selected = target, planned
+                    selected = phase, target, planned
                     break
                 survey.failed(target, support.resolution)
             if selected is None:
                 consecutive_failures += 1
-                await self.observe(task, math.pi / 2)
+                angle = 90 if abs(ground_z - platform_z) <= .06 else 25
+                scan_angle = math.radians(angle)
                 continue
-            target, (path, points) = selected
-            finished = await self.follow(task, path, points, requests, results)
+            phase, target, (path, points) = selected
+            finished = await self.follow(task, path, points, requests, results, phase, platform_z)
             _, (current, _) = await self.wait_support(task, 1.25)
             if finished or math.dist(xy, current) > .32:
                 consecutive_failures = 0
-                survey.visited.append(xy)
-                needs_observation = True
+                if phase == "platform":
+                    survey.visited.append(current)
+                scan_angle = math.radians(90 if phase == "platform" else 25)
             else:
                 survey.failed(target, support.resolution)
                 consecutive_failures += 1
-                needs_observation = True
+                scan_angle = math.radians(25)
+        self.report("search_exhausted", self.pose()[0], detail=f"consecutive_failures={consecutive_failures}")
         raise RuntimeError("Ranger found no confirmed safe route within the search budget; stopped")

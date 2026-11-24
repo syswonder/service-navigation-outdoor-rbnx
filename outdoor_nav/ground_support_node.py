@@ -11,7 +11,7 @@ from nav_msgs.msg import OccupancyGrid
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
-from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import Image, PointCloud2
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import String
 from tf2_ros import Buffer, TransformListener, TransformException
@@ -19,7 +19,7 @@ from semantic_local_grid.geometry import transform
 from semantic_local_grid.ros_utils import matrix_from_tf
 
 from .configuration import load_runtime
-from .core.ground_support import CELL, DEPTH_TOPIC, FRAME, GRID_TOPIC, SIZE, GroundGrid, SupportMask
+from .core.ground_support import CELL, DEPTH_TOPIC, FRAME, GRID_TOPIC, HEIGHT_TOPIC, SIZE, GroundGrid, SupportMask
 
 
 def seconds(stamp):
@@ -40,14 +40,29 @@ def xy_yaw(pose):
 
 
 class SupportFeed:
-    def __init__(self, node, config, tf):
+    def __init__(self, node, config, tf, *, with_heights=False):
         self.node, self.config, self.tf = node, config, tf
         self.snapshot = None
         self.invalid_before = -math.inf
+        self.heights = {}
         node.create_subscription(OccupancyGrid, GRID_TOPIC, self.receive, 1)
+        if with_heights:
+            node.create_subscription(Image, HEIGHT_TOPIC, self.receive_height, 1)
+
+    def receive_height(self, msg):
+        if (msg.header.frame_id == FRAME and msg.width == SIZE and msg.height == SIZE
+                and msg.encoding == "32FC1" and msg.step == SIZE*4 and len(msg.data) == SIZE*SIZE*4):
+            stamp = seconds(msg.header.stamp)
+            dtype = ">f4" if msg.is_bigendian else "<f4"
+            values = np.frombuffer(bytes(msg.data), dtype=dtype).reshape(SIZE, SIZE)
+            self.heights = {**dict(list(self.heights.items())[-2:]), stamp: values}
+
+    def elevation(self, sample):
+        return self.heights.get(sample.stamp)
 
     def invalidate(self):
         self.snapshot = None
+        self.heights = {}
         self.invalid_before = self.node.get_clock().now().nanoseconds / 1e9
 
     def receive(self, msg):
@@ -89,6 +104,7 @@ class GroundSupport(Node):
                                math.tan(math.radians(self.p["ranger_grade_limit_deg"])),
                                self.p["footprint_radius_m"])
         self.pub = self.create_publisher(OccupancyGrid, GRID_TOPIC, 1)
+        self.height_pub = self.create_publisher(Image, HEIGHT_TOPIC, 1)
         self.lidar = None
         self.correction = None
         self.last_depth = -math.inf
@@ -164,6 +180,9 @@ class GroundSupport(Node):
         output.info.origin.position.x, output.info.origin.position.y = map(float, self.grid.origin)
         output.info.origin.orientation.w = 1.
         output.data = np.where(supported, 0, 100).astype(np.int8).ravel().tolist()
+        heights = np.where(supported, self.grid.height, np.nan).astype("<f4")
+        self.height_pub.publish(Image(header=output.header, height=SIZE, width=SIZE,
+                                      encoding="32FC1", step=SIZE*4, data=heights.tobytes()))
         self.pub.publish(output)
 
 

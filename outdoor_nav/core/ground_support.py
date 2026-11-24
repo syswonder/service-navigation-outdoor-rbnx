@@ -7,6 +7,7 @@ import numpy as np
 
 DEPTH_TOPIC = "/outdoor/ranger/registered_depth"
 GRID_TOPIC = "/outdoor/ranger/ground_support"
+HEIGHT_TOPIC = "/outdoor/ranger/ground_height"
 ACK_TOPIC = "/outdoor/ranger/ground_support_ack"
 CELL = .16
 SIZE = 101
@@ -122,7 +123,7 @@ class SupportMask:
         self.safe = cv2.erode(cells.astype(np.uint8), kernel, borderType=cv2.BORDER_CONSTANT,
                               borderValue=0).astype(bool)
 
-    def clear(self, points):
+    def clear(self, points, allowed=None):
         points = np.asarray(points)
         if not np.isfinite(points).all():
             return False
@@ -130,12 +131,13 @@ class SupportMask:
         x, y = ij.T
         height, width = self.safe.shape
         return bool(((x >= 0) & (x < width) & (y >= 0) & (y < height)).all()
-                    and self.safe[y, x].all())
+                    and self.safe[y, x].all()
+                    and (allowed is None or allowed[y, x].all()))
 
-    def corridor(self, start, points):
+    def corridor(self, start, points, allowed=None):
         for end in points:
             count = max(2, math.ceil(math.dist(start, end) / (self.resolution * .25)) + 1)
-            if not self.clear(np.linspace(start, end, count)):
+            if not self.clear(np.linspace(start, end, count), allowed):
                 return False
             start = end
         return True

@@ -50,10 +50,31 @@ def test_rejects_old_free_path_at_the_actual_braking_horizon():
 
 
 def test_survey_uses_support_and_skips_failed_target():
-    _, support = observed(terrain())
+    grid, support = observed(terrain())
     survey = Survey()
-    target = survey.candidates(support, (0., 0.), (1.5, 0.))[0]
+    choices = survey.staged_candidates(support, grid.height, (0., 0.), (1.5, 0.), 0., 0.)
+    _, target = choices[0]
     assert target == (1.5, 0.)
     for _ in range(3):
         survey.failed(target, CELL)
-    assert target not in survey.candidates(support, (0., 0.), (1.5, 0.))
+    choices = survey.staged_candidates(support, grid.height, (0., 0.), (1.5, 0.), 0., 0.)
+    assert all(point != target for _, point in choices)
+
+def test_survey_prefers_confirmed_lower_progress_over_platform_viewpoint():
+    grid, support = observed(terrain())
+    choices = Survey().staged_candidates(support, grid.height, (0., 0.), (4., 0.), 0., 0.)
+    assert choices
+    assert choices[0][0] == "descent"
+    assert choices[0][1][0] > .55
+
+
+def test_survey_can_continue_on_lower_landing_but_cannot_scout_across_drop():
+    grid, support = observed(terrain(drop=True))
+    survey = Survey()
+    choices = survey.staged_candidates(support, grid.height, (0., 0.), (4., 0.), 0., 0.)
+    assert all(target[0] < .70 for _, target in choices)
+
+    grid, support = observed(terrain())
+    heights = np.where(support.cells, -.68, np.nan)
+    choices = survey.staged_candidates(support, heights, (0., 0.), (4., 0.), 0., -.68)
+    assert choices and choices[0][0] == "descent"
