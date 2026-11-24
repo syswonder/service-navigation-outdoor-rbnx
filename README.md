@@ -84,12 +84,11 @@ semantic_segmentation:
 | 参数 | 默认话题 | 消息 |
 | --- | --- | --- |
 | `camera_labels` | `/outdoor/vision/semantic_labels` | `sensor_msgs/Image`, `mono16`，保留完整类别 |
-| `camera_confidence` | `/outdoor/vision/semantic_confidence` | `sensor_msgs/Image`, `32FC1` |
 | `camera_road_mask` | `/outdoor/vision/road_mask` | `sensor_msgs/Image`, `mono8`：0 非道路、1 道路、255 未知 |
 | `camera_segmentation_status` | `/semantic/segmentation_status` | `std_msgs/String` JSON，包含类别表、未知编号、源时间戳、状态 |
 | `camera_overlay` | `/semantic/debug_overlay` | `sensor_msgs/Image`, `rgb8` |
 
-三张输出图像保留原 RGB 的时间戳和坐标系。斜坡、楼梯等类别不会被压成道路后丢失，
+标签、道路掩码和调试图保留原 RGB 的时间戳和坐标系。置信度仅在模型内部用于过滤低分像素，不再单独发布大幅浮点图或参与 RGB-D 配对。斜坡、楼梯等类别不会被压成道路后丢失，
 但当前完整类别图只提供识别结果；本轮未实现基于三维坡度、阶高和底盘能力的可通行判定。
 `road_classes` 仅影响几何已知地面的软代价，不能清除相机或雷达障碍，也不触发步态切换。
 推理故障或过期结果按原有语义时效退出，几何链路继续工作；关闭语义时不启动推理和投影。

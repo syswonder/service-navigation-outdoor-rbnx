@@ -23,6 +23,7 @@ class TerrainMachine:
         self.candidate_since = self.clear_since = self.phase_since = None
         self.target_yaw = self.candidate_heading = None
         self.flat_wait_since = None
+        self.stair_seen_since = -math.inf
         self.incline_hold = False
         self.failed = self.align_armed = False
         self.last_request = -math.inf
@@ -58,20 +59,35 @@ class TerrainMachine:
                 if not flat:
                     self.candidate_since = None
                     return self.output(allowed=False, reason='stairs_wait_level')
-                if obs.get('direction') != 'up' or obs.get('heading_yaw') is None:
+                # Flat gait may only close in on the steps from a distance;
+                # inside the enter range it must stop until the machine has
+                # confirmed, squared up and switched gait, otherwise the robot
+                # would walk up the staircase in flat gait.
+                front = obs.get('front_m')
+                close = front is not None and front <= self.p['stair_enter_range_m']
+                if obs.get('direction') != 'up':
                     self.candidate_since = None
-                    return self.output(allowed=False, reason='stair_direction_unresolved')
+                    return self.output(allowed=not close,
+                                       reason='stair_stop_range' if close else 'stair_direction_pending')
+                if obs.get('heading_yaw') is None:
+                    self.candidate_since = None
+                    return self.output(allowed=not close,
+                                       reason='stair_stop_range' if close else 'stair_heading_pending')
                 if self.candidate_heading is not None and abs(wrap(obs['heading_yaw']-self.candidate_heading)) > math.radians(self.p['alignment_tolerance_deg']):
                     self.candidate_since = None
                 self.candidate_heading = obs['heading_yaw']
                 self.candidate_since = evidence_time if self.candidate_since is None else self.candidate_since
-                if evidence_time - self.candidate_since >= self.p['confirm_s']:
+                # Inside the enter range one good frame is enough: the robot is
+                # already at the steps, waiting for a second frame only lets it
+                # creep up in flat gait.
+                if close or evidence_time - self.candidate_since >= self.p['confirm_s']:
                     self.state, self.phase, self.reason = 'stairs_up', 'align', 'align_stair_front'
                     self.target_yaw = obs['heading_yaw']
                     self.phase_since = now
                     self.align_armed = False
                 else:
-                    return self.output(allowed=False, reason='confirming_stairs')
+                    return self.output(allowed=not close,
+                                       reason='stair_stop_range' if close else 'confirming_stairs')
             else:
                 self.candidate_since = None
                 if self.state == 'stop':
@@ -97,7 +113,19 @@ class TerrainMachine:
                 self.flat_wait_since = None
                 return self.output(allowed=True)
         if self.state == 'stairs_up':
-            if obs is None or yaw is None or not math.isfinite(yaw):
+            if obs is None:
+                # While climbing, the body lies parallel to the slope and the
+                # camera cannot see the steps any more; a tilted IMU is proof
+                # enough that the climb is still in progress. A frame or two
+                # may also be missed on level ground before the climb starts.
+                if self.phase == 'climb' and not flat:
+                    return self.output(allowed=gait_fresh and actual_gait == self.p['upstairs_gait_code'], reason='stair_observation_gap')
+                recent = now - getattr(self, 'stair_seen_since', -math.inf) <= self.p['observation_timeout_s']
+                if recent:
+                    return self.output(allowed=self.phase == 'climb' and gait_fresh and actual_gait == self.p['upstairs_gait_code'], reason='stair_observation_gap')
+                return self.output(allowed=False, reason='stair_observation_unavailable')
+            self.stair_seen_since = now
+            if yaw is None or not math.isfinite(yaw):
                 return self.output(allowed=False, reason='stair_observation_unavailable')
             if flat and not seen:
                 self.clear_since = evidence_time if self.clear_since is None else self.clear_since

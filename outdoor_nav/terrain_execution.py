@@ -45,9 +45,10 @@ class TerrainExecution:
                 yaw = math.atan2(2*(q.w*q.z+q.x*q.y), 1-2*(q.y*q.y+q.z*q.z))
         except Exception:
             pass
+        self.observation = i.selected(i.machine.state)
         self.result = i.machine.tick(now, enable=enable,
             pitch=i.pitch if i.fresh(i.pitch_stamp) else None,
-            observation=i.selected(i.machine.state), yaw=yaw,
+            observation=self.observation, yaw=yaw,
             actual_gait=body.get('gait'), gait_fresh=fresh, gait_ready=ready, stopped=stopped)
         self.at = now
         request = self.result['gait_request']
@@ -91,7 +92,11 @@ class TerrainExecution:
                 return False
             tf = n.tf.lookup_transform('odom', 'base_link', Time())
             t = tf.transform.translation
-            r, meta = n.config['footprint_radius_m'], grid.info
+            # Retain the branch's rotation check with a smaller experimental
+            # stair clearance; this is not a measured chassis sweep radius.
+            stairs = bool((self.observation or {}).get('stairs'))
+            r = 0.25 if stairs else n.config['footprint_radius_m']
+            meta = grid.info
             # Full circumscribed disk must be observed and free of lethal costs.
             low_x = math.floor((t.x-r-meta.origin.position.x)/meta.resolution)
             high_x = math.ceil((t.x+r-meta.origin.position.x)/meta.resolution)

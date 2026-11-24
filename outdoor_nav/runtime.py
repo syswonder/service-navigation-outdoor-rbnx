@@ -495,7 +495,8 @@ class OutdoorExecutor(Executor):
             for k, limit in (("lidar", t), ("global_map", 3), ("local_map", t))
         }
         health["lidar"] = not c.get("lidar_enabled", True) or health["lidar"]
-        health["camera"] = not c.get("camera_enabled", False) or now-self.stats.get("camera", -math.inf) < t
+        health["camera"] = not (c.get("camera_enabled", False)
+                                and c.get("camera_geometry_enabled", True)) or now-self.stats.get("camera", -math.inf) < t
         health.update(
             localization=continuation_allowed(g, owned, c["allow_float_during_fixed_task"])
             and now-self.geo_at < c.get('localization_timeout_s', 3.0),

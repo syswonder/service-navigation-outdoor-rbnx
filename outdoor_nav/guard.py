@@ -87,7 +87,11 @@ class Watchdog(Node):
             "localization_unready": self.ready,
             "localization_stale": now - self.geo_at < self.config.get("localization_timeout_s", 3.0),
             "scan_stale": not self.config.get("lidar_enabled", True) or now - self.scan_at < self.config["sensor_timeout_s"],
-            "camera_stale": not self.config.get("camera_enabled", False) or now-getattr(self, "camera_at", 0) < self.config["sensor_timeout_s"],
+            # The camera obstacle scan only exists when the depth-geometry chain
+            # runs; segmentation-only camera use does not publish one.
+            "camera_stale": not (self.config.get("camera_enabled", False)
+                                 and self.config.get("camera_geometry_enabled", True))
+                             or now-getattr(self, "camera_at", 0) < self.config["sensor_timeout_s"],
             "command_stale": now - self.command_at < self.config["command_timeout_s"],
         }
         blockers = [reason for reason, passed in checks.items() if not passed]

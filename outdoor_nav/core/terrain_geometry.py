@@ -20,32 +20,35 @@ def forward_mask(points, max_range, half_width=None):
     return keep
 
 
-def stair_front(points, parameters):
-    """Fit the nearest visible stair edge; normal, not image-centre bearing.
+def stair_heading(points, parameters):
+    """Estimate uphill direction from the whole flight's principal components.
 
-    Robust percentile band + PCA line fit; reject insufficient width, a thick
-    patch or an ambiguous line. Direction requires measured positive elevation.
+    The smallest component is the slope-plane normal. Its horizontal gradient
+    resolves uphill without assuming the longest component spans stair width.
     """
     p = np.asarray(points, float).reshape(-1, 3)
+    p = p[np.isfinite(p).all(axis=1)]
     result = dict(stairs=len(p) >= parameters['min_stair_points'], direction='unknown', heading_yaw=None)
     if not result['stairs']:
         return result
     if np.percentile(p[:, 2], 75) - parameters['ground_z_m'] < parameters['min_stair_rise_m']:
         return result
-    result['direction'] = 'up'
-    front = p[p[:, 0] <= np.percentile(p[:, 0], 5) + parameters['front_band_m'], :2]
-    if len(front) < parameters['min_stair_points']:
+    centered = p - p.mean(axis=0)
+    values, vectors = np.linalg.eigh(np.cov(centered.T))
+    if values[1] <= 0 or values[1] < 4 * max(0., values[0]):
         return result
-    center = np.median(front, axis=0)
-    values, vectors = np.linalg.eigh(np.cov((front-center).T))
-    normal, edge = vectors[:, 0], vectors[:, 1]
-    span = np.ptp(front @ edge)
-    residual = np.sqrt(max(0., values[0]))
-    if span < parameters['min_front_width_m'] or residual > parameters['max_front_residual_m'] or values[1] < 4*values[0]:
+    normal = vectors[:, 0]
+    if abs(normal[2]) < .1:
         return result
-    if normal[0] < 0:
-        normal = -normal
-    result['heading_yaw'] = float(math.atan2(normal[1], normal[0]))
+    uphill = -normal[:2] / normal[2]
+    length = np.linalg.norm(uphill)
+    if length < 1e-6 or uphill[0] <= 0:
+        return result
+    uphill /= length
+    across = np.array([-uphill[1], uphill[0]])
+    if np.ptp(p[:, :2] @ across) < parameters['min_stair_width_m']:
+        return result
+    result.update(direction='up', heading_yaw=float(math.atan2(uphill[1], uphill[0])))
     return result
 
 

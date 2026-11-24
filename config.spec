@@ -64,7 +64,6 @@ properties:
         type: string
         default: "/outdoor/vision/current_grid"
       camera_labels: {type: string, default: /outdoor/vision/semantic_labels}
-      camera_confidence: {type: string, default: /outdoor/vision/semantic_confidence}
       camera_road_mask: {type: string, default: /outdoor/vision/road_mask}
       camera_segmentation_status: {type: string, default: /semantic/segmentation_status}
       camera_overlay: {type: string, default: /semantic/debug_overlay}
@@ -500,15 +499,13 @@ properties:
       min_stair_rise_m:
         type: number
         default: 0.08
-      front_band_m:
-        type: number
-        default: 0.2
-      min_front_width_m:
+      min_stair_width_m:
         type: number
         default: 0.35
-      max_front_residual_m:
+      stair_enter_range_m:
         type: number
-        default: 0.08
+        default: 1.2
+        description: Stop flat-gait approach inside this nearest visible stair-point range until alignment and gait confirmation.
       alignment_tolerance_deg:
         type: number
         default: 6.0
