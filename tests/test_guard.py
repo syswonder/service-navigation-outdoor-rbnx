@@ -148,7 +148,7 @@ def test_auto_ranger_tracks_flat_limits_a_crest_and_stops_on_depth_loss():
     heights = np.zeros((SIZE, SIZE))
     n.support = S(elevation=lambda sample: heights)
     n.command.linear.x = .4
-    n.ranger_observation = lambda now: (support, (0., 0.), 0., .4)
+    n.ranger_observation = lambda now, feed=None: (support, (0., 0.), 0., .4)
     n.ranger_limit = lambda command, now: Watchdog.ranger_limit(n, command, now)
     with patch("outdoor_nav.guard.time.monotonic", return_value=10.):
         Watchdog.tick(n)
@@ -157,9 +157,17 @@ def test_auto_ranger_tracks_flat_limits_a_crest_and_stops_on_depth_loss():
         Watchdog.tick(n)
         assert n.pub.publish.call_args.args[0].linear.x == 0.
         n.descent_at = 10.
-        n.ranger_observation = lambda now: (support, (0., 0.), 0., .2)
+        n.ranger_observation = lambda now, feed=None: (support, (0., 0.), 0., .2)
+        Watchdog.tick(n)
+        assert n.pub.publish.call_args.args[0].linear.x == 0.
+        n.survey_at = 10.
+        n.survey_support = n.support
         Watchdog.tick(n)
         assert n.pub.publish.call_args.args[0].linear.x == pytest.approx(.22)
-        n.ranger_observation = lambda now: None
+        n.descent_at = -math.inf
+        Watchdog.tick(n)
+        assert n.pub.publish.call_args.args[0].linear.x == 0.
+        n.ranger_observation = lambda now, feed=None: None
+        n.survey_at = -math.inf
         Watchdog.tick(n)
         assert n.pub.publish.call_args.args[0].linear.x == 0.

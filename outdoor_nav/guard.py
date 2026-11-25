@@ -47,18 +47,22 @@ class Watchdog(Node):
         self.create_timer(1.0, self.check_owners)
         if self.config.get("ranger_descent_enabled", False):
             from tf2_ros import Buffer, TransformListener
-            from .core.ground_support import DESCENT_ACTIVE_TOPIC
+            from .core.ground_support import DESCENT_ACTIVE_TOPIC, SURVEY_ACTIVE_TOPIC
             from .ground_support_node import SupportFeed
             self.ranger_auto = self.config.get("ranger_descent_mode") == "auto"
             self.support_tf = Buffer()
             self.support_listener = TransformListener(self.support_tf, self)
             self.support = SupportFeed(self, self.config, self.support_tf, with_heights=self.ranger_auto)
+            self.survey_support = (SupportFeed(self, self.config, self.support_tf, with_heights=True, survey=True)
+                                   if self.ranger_auto else None)
             self.speed_sample = None
             self.support_epoch = None
             self.descent_at = -math.inf
+            self.survey_at = -math.inf
             self.create_subscription(Odometry, "/outdoor/odom", self.ranger_odometry, 10)
             if self.ranger_auto:
                 self.create_subscription(Bool, DESCENT_ACTIVE_TOPIC, self.ranger_descent_state, 1)
+                self.create_subscription(Bool, SURVEY_ACTIVE_TOPIC, self.ranger_survey_state, 1)
 
     def check_owners(self):
         conflict = self.count_publishers(self.pub.topic_name) > 1
@@ -89,7 +93,10 @@ class Watchdog(Node):
                          (data.get("navigation_sample") or {}).get("epoch"))
                 if self.support_epoch is not None and self.support_epoch != epoch:
                     self.support.invalidate()
+                    if self.survey_support is not None:
+                        self.survey_support.invalidate()
                     self.descent_at = -math.inf
+                    self.survey_at = -math.inf
                 self.support_epoch = epoch
         except (ValueError, KeyError):
             self.ready = False
@@ -107,10 +114,13 @@ class Watchdog(Node):
     def ranger_descent_state(self, msg):
         self.descent_at = time.monotonic() if msg.data else -math.inf
 
-    def ranger_observation(self, now):
+    def ranger_survey_state(self, msg):
+        self.survey_at = time.monotonic() if msg.data else -math.inf
+
+    def ranger_observation(self, now, *, feed=None):
         from tf2_ros import TransformException
         from .ground_support_node import latest_base, xy_yaw
-        support = self.support.fresh()
+        support = (feed if feed is not None else self.support).fresh()
         feedback = self.speed_sample
         timeout = self.config["ranger_depth_timeout_s"]
         if support is None or feedback is None:
@@ -136,11 +146,19 @@ class Watchdog(Node):
 
     def ranger_limit(self, command, now):
         from .core.ground_support import SEGMENT_SPEED, braking_paths, braking_speed
-        observation = self.ranger_observation(now)
+        timeout = self.config["command_timeout_s"]
+        survey = now - getattr(self, "survey_at", -math.inf) < timeout
+        descent = now - self.descent_at < timeout
+        if descent and not survey:
+            return Twist(), "ranger_mode_unconfirmed"
+        if survey and not descent and command.linear.x:
+            return Twist(), "ranger_survey_waiting_for_segment"
+        feed = self.survey_support if survey else self.support
+        observation = self.ranger_observation(now, feed=feed)
         if observation is None:
             return Twist(), "ranger_ground_stale"
         support, xy, yaw, measured = observation
-        heights = self.support.elevation(support)
+        heights = feed.elevation(support)
         if heights is None:
             return Twist(), "ranger_height_unpaired"
         speed, turn = command.linear.x, command.angular.z
@@ -150,7 +168,6 @@ class Watchdog(Node):
             return command, None
         if measured < -.01 or not math.isfinite(self.ranger_yaw_rate):
             return Twist(), "ranger_velocity_unconfirmed"
-        descent = now - self.descent_at < self.config["command_timeout_s"]
         latency = self.config["ranger_depth_timeout_s"] + .05 + self.config["ranger_actuation_latency_s"]
         decel = self.config["ranger_brake_mps2"]
         radius = self.config["footprint_radius_m"]
@@ -158,13 +175,15 @@ class Watchdog(Node):
         horizon = radius + max(.9, stopping + .55)
         available, reason = horizon, "ranger_ground_unconfirmed"
         for points in braking_paths(xy, yaw, speed, turn, abs(measured), self.ranger_yaw_rate, horizon):
-            profile = support.profile(xy, points, heights)
+            profile = support.profile(xy, points, heights, detect_slope=not descent)
             distance = profile.supported_m
             why = profile.reason
             if not descent and profile.crest_m is not None:
                 distance, why = min(distance, max(0., profile.crest_m - radius)), "ranger_crest"
             if distance < available:
                 available, reason = distance, why
+        if not descent and available <= .8 and reason == "ground_hazard":
+            self.ranger_terrain_ahead = reason
         if descent and measured > SEGMENT_SPEED:
             return Twist(), "ranger_descent_overspeed"
         cap = braking_speed(available, abs(measured), min(speed, SEGMENT_SPEED) if descent else speed,
@@ -177,6 +196,7 @@ class Watchdog(Node):
 
     def tick(self):
         now = time.monotonic()
+        self.ranger_terrain_ahead = None
         output = Twist()
         checks = {
             "output_conflict": not self.conflict,
@@ -229,6 +249,7 @@ class Watchdog(Node):
                         "diagnostic": self.diagnostic,
                         "output_topic": self.pub.topic_name,
                         "blocked_reasons": blockers,
+                        "ranger_terrain_ahead": self.ranger_terrain_ahead,
                     }
                 )
             )

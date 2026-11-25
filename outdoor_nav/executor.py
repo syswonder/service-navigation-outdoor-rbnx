@@ -725,10 +725,10 @@ class Executor(Node):
                                             controller_patience_s=policy.get("controller_patience_s", 20.0))
                     recovery_used = recovery
                 if ranger is not None:
-                    target = ranger.downhill_candidate(position, current_points)
                     handled = False
-                    if target is not None:
-                        await ranger.descend(task_id, target, follow_requests, follow_results)
+                    if current_points and ranger.should_take_over(task_id):
+                        await ranger.search_and_descend(task_id, goal_point, guidance, tolerance,
+                                                        follow_requests, follow_results)
                         handled = True
                     elif current_points:
                         handled = await ranger.observe_unknown(task_id, follow_requests, follow_results)

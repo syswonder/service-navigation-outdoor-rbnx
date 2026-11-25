@@ -9,7 +9,7 @@ from .terrain_inputs import TerrainInputs
 from .core.gait import chassis_prepared
 
 
-def rotation_clear(n):
+def rotation_clear(n, *, stairs=False, ground=None):
     grid = n.local_map
     if grid is None or time.monotonic()-n.stats.get('local_map', -math.inf) >= n.config['sensor_timeout_s']:
         return False
@@ -20,7 +20,6 @@ def rotation_clear(n):
         t = tf.transform.translation
         # Retain the branch's rotation check with a smaller experimental
         # stair clearance; this is not a measured chassis sweep radius.
-        stairs = bool((self.observation or {}).get('stairs'))
         r = 0.25 if stairs else n.config['footprint_radius_m']
         meta = grid.info
         # Full circumscribed disk must be observed and free of lethal costs.
@@ -36,7 +35,8 @@ def rotation_clear(n):
                 dy = meta.origin.position.y+(y+.5)*meta.resolution-t.y
                 if math.hypot(dx, dy) <= r+meta.resolution:
                     cost = grid.data[y*meta.width+x]
-                    if cost < 0 or cost >= 99:
+                    if cost >= 99 or (cost < 0 and
+                                     (ground is None or not ground.ground_at((t.x+dx, t.y+dy)))):
                         return False
         return True
     except Exception:
@@ -120,4 +120,4 @@ class TerrainExecution:
         return out
 
     def rotation_clear(self):
-        return rotation_clear(self.node)
+        return rotation_clear(self.node, stairs=bool((self.observation or {}).get("stairs")))

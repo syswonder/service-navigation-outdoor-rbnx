@@ -19,7 +19,10 @@ from semantic_local_grid.geometry import transform
 from semantic_local_grid.ros_utils import matrix_from_tf
 
 from .configuration import load_runtime
-from .core.ground_support import CELL, DEPTH_TOPIC, FRAME, GRID_TOPIC, HEIGHT_TOPIC, SIZE, GroundGrid, SupportMask
+from .core.ground_support import (
+    CELL, DEPTH_TOPIC, FRAME, GRID_TOPIC, HEIGHT_TOPIC, SIZE, SURVEY_GRID_TOPIC, SURVEY_HEIGHT_TOPIC,
+    GroundGrid, SupportMask,
+)
 
 
 def seconds(stamp):
@@ -40,14 +43,16 @@ def xy_yaw(pose):
 
 
 class SupportFeed:
-    def __init__(self, node, config, tf, *, with_heights=False):
+    def __init__(self, node, config, tf, *, with_heights=False, survey=False):
         self.node, self.config, self.tf = node, config, tf
         self.snapshot = None
         self.invalid_before = -math.inf
         self.heights = {}
-        node.create_subscription(OccupancyGrid, GRID_TOPIC, self.receive, 1)
+        grid_topic = SURVEY_GRID_TOPIC if survey else GRID_TOPIC
+        height_topic = SURVEY_HEIGHT_TOPIC if survey else HEIGHT_TOPIC
+        node.create_subscription(OccupancyGrid, grid_topic, self.receive, 1)
         if with_heights:
-            node.create_subscription(Image, HEIGHT_TOPIC, self.receive_height, 1)
+            node.create_subscription(Image, height_topic, self.receive_height, 1)
 
     def receive_height(self, msg):
         if (msg.header.frame_id == FRAME and msg.width == SIZE and msg.height == SIZE
@@ -108,6 +113,11 @@ class GroundSupport(Node):
         self.grid = GroundGrid(self.p["ranger_step_limit_m"],
                                math.tan(math.radians(self.p["ranger_grade_limit_deg"])),
                                self.p["footprint_radius_m"])
+        self.survey_grid = (GroundGrid(self.grid.step, self.grid.grade, self.grid.radius)
+                            if self.auto else None)
+        if self.auto:
+            self.survey_pub = self.create_publisher(OccupancyGrid, SURVEY_GRID_TOPIC, 1)
+            self.survey_height_pub = self.create_publisher(Image, SURVEY_HEIGHT_TOPIC, 1)
         self.pub = self.create_publisher(OccupancyGrid, GRID_TOPIC, 1)
         self.height_pub = self.create_publisher(Image, HEIGHT_TOPIC, 1)
         self.lidar = None
@@ -122,6 +132,15 @@ class GroundSupport(Node):
     def on_lidar(self, msg):
         self.lidar = msg
 
+    def reset_ground(self):
+        for grid in (self.grid, self.survey_grid):
+            if grid is not None:
+                grid.height.fill(np.nan)
+                grid.observed.fill(-np.inf)
+                grid.depth_observed.fill(-np.inf)
+                grid.rough.fill(False)
+        self.lidar = None
+
     def on_geo(self, msg):
         try:
             geo = json.loads(msg.data)
@@ -131,11 +150,7 @@ class GroundSupport(Node):
             return
         if self.correction is not None and epoch != self.correction:
             # Discard the old support without seeding a different location.
-            self.grid.height.fill(np.nan)
-            self.grid.observed.fill(-np.inf)
-            self.grid.depth_observed.fill(-np.inf)
-            self.grid.rough.fill(False)
-            self.lidar = None
+            self.reset_ground()
         self.correction = epoch
 
     def points(self, msg):
@@ -153,16 +168,14 @@ class GroundSupport(Node):
         self.last_clock = now
         if cleared:
             self.last_depth = -math.inf
-            self.grid.height.fill(np.nan)
-            self.grid.observed.fill(-np.inf)
-            self.grid.depth_observed.fill(-np.inf)
-            self.grid.rough.fill(False)
-            self.lidar = None
+            self.reset_ground()
         timeout = self.p["ranger_depth_timeout_s"]
         if not (0 < stamp and self.last_depth < stamp and 0 <= now-stamp < timeout):
             return
         self.last_depth = stamp
         lidar = self.lidar
+        survey_support = None
+        valid = True
         try:
             pose = self.tf.lookup_transform(FRAME, "base_link", Time.from_msg(msg.header.stamp))
             xy, _ = xy_yaw(pose)
@@ -177,34 +190,44 @@ class GroundSupport(Node):
             age = self.p["ranger_ground_cell_timeout_s"] if self.auto else 45.
             # LiDAR supplies close-range support outside the depth camera's
             # footprint. Beyond that strip auto mode requires observed depth.
-            if self.auto:
-                raw = raw[np.linalg.norm(raw[:, :2] - xy, axis=1) <= self.grid.radius + .9]
-            supported = self.grid.update(xy, ground, np.concatenate((depth, raw)),
+            near_raw = (raw[np.linalg.norm(raw[:, :2] - xy, axis=1) <= self.grid.radius + .9]
+                        if self.auto else raw)
+            supported = self.grid.update(xy, ground, np.concatenate((depth, near_raw)),
                                          stamp, age, depth_count=len(depth),
                                          lidar_stamp=lidar_stamp if self.auto else None)
-            hazards = self.grid.hazard
+            if self.survey_grid is not None:
+                survey_support = self.survey_grid.update(xy, ground, np.concatenate((depth, raw)),
+                                                        stamp, depth_count=len(depth), lidar_stamp=lidar_stamp)
         except (TransformException, ValueError, TypeError, AssertionError):
+            valid = False
             supported = np.zeros((SIZE, SIZE), dtype=bool)
-            hazards = np.zeros_like(supported)
-        if self.grid.origin is None:
+            if self.survey_grid is not None:
+                survey_support = supported
+        self.publish_ground(msg, stamp, self.grid, supported, self.pub, self.height_pub, valid)
+        if survey_support is not None:
+            self.publish_ground(msg, stamp, self.survey_grid, survey_support,
+                                self.survey_pub, self.survey_height_pub, valid)
+
+    def publish_ground(self, msg, stamp, grid, supported, publisher, height_publisher, valid):
+        if grid.origin is None:
             return
         output = OccupancyGrid()
         output.header = msg.header
         output.header.frame_id = FRAME
         output.info.resolution = CELL
         output.info.width = output.info.height = SIZE
-        output.info.origin.position.x, output.info.origin.position.y = map(float, self.grid.origin)
+        output.info.origin.position.x, output.info.origin.position.y = map(float, grid.origin)
         output.info.origin.orientation.w = 1.
         if self.auto:
-            depth_fresh = stamp - self.grid.depth_observed <= self.p["ranger_ground_cell_timeout_s"]
-            values = np.where(supported, np.where(depth_fresh, 0, 1), np.where(hazards, 100, -1))
+            depth_fresh = stamp - grid.depth_observed <= self.p["ranger_ground_cell_timeout_s"]
+            values = np.where(supported, np.where(depth_fresh, 0, 1), np.where(valid & grid.hazard, 100, -1))
         else:
             values = np.where(supported, 0, 100)
         output.data = values.astype(np.int8).ravel().tolist()
-        heights = np.where(supported, self.grid.height, np.nan).astype("<f4")
-        self.height_pub.publish(Image(header=output.header, height=SIZE, width=SIZE,
-                                      encoding="32FC1", step=SIZE*4, data=heights.tobytes()))
-        self.pub.publish(output)
+        heights = np.where(supported, grid.height, np.nan).astype("<f4")
+        height_publisher.publish(Image(header=output.header, height=SIZE, width=SIZE,
+                                       encoding="32FC1", step=SIZE*4, data=heights.tobytes()))
+        publisher.publish(output)
 
 
 def main():

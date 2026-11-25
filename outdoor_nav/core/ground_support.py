@@ -9,8 +9,11 @@ import numpy as np
 DEPTH_TOPIC = "/outdoor/ranger/registered_depth"
 GRID_TOPIC = "/outdoor/ranger/ground_support"
 HEIGHT_TOPIC = "/outdoor/ranger/ground_height"
+SURVEY_GRID_TOPIC = "/outdoor/ranger/survey_ground_support"
+SURVEY_HEIGHT_TOPIC = "/outdoor/ranger/survey_ground_height"
 ACK_TOPIC = "/outdoor/ranger/ground_support_ack"
 DESCENT_ACTIVE_TOPIC = "/outdoor/ranger/descent_active"
+SURVEY_ACTIVE_TOPIC = "/outdoor/ranger/survey_active"
 CELL = .16
 SIZE = 101
 FRAME = "odom"
@@ -160,7 +163,12 @@ class SupportMask:
             start = end
         return True
 
-    def profile(self, start, points, heights, limit=8., landing_distance=.70):
+    def ground_at(self, xy):
+        x, y = np.floor((np.asarray(xy) - self.origin) / self.resolution).astype(int)
+        height, width = self.cells.shape
+        return 0 <= x < width and 0 <= y < height and bool(self.cells[y, x])
+
+    def profile(self, start, points, heights, limit=8., landing_distance=.70, detect_slope=True):
         """Sample the forward route up to the first unsupported footprint."""
         if heights is None or not self.clear([start]):
             return GroundProfile(0.)
@@ -179,12 +187,16 @@ class SupportMask:
                 traveled = distance[-1] + math.dist(samples[-1], sample)
                 if traveled > limit or not self.clear([sample]):
                     reason = self.blocked_reason(sample) if traveled <= limit else reason
+                    if not detect_slope:
+                        return GroundProfile(distance[-1], reason=reason)
                     return ground_profile(distance, samples, levels, depth_seen, reason, landing_distance)
                 distance.append(traveled)
                 samples.append(sample)
                 levels.append(self.level(sample, heights))
                 depth_seen.append(self.depth_at(sample))
             xy = end
+        if not detect_slope:
+            return GroundProfile(distance[-1], reason=reason)
         return ground_profile(distance, samples, levels, depth_seen, reason, landing_distance)
 
     def level(self, xy, heights):

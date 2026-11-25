@@ -137,7 +137,7 @@ properties:
         type: string
         enum: [auto, staged]
         default: auto
-        description: Follow normally and switch on a confirmed ramp, or use legacy staged navigation.
+        description: Follow normally, survey confirmed terrain hazards, descend by supported segments, and resume ordinary tracking. Staged mode owns the whole task.
       ranger_step_limit_m:
         type: number
         default: 0.075

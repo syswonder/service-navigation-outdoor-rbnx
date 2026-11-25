@@ -431,10 +431,10 @@ class OutdoorExecutor(Executor):
             self.cycle.sample(self.geo)
         if getattr(self, "ranger", None) is not None and correction_pending(self.geo, getattr(self, "handled_recovery", 0),
                                                           getattr(self, "handled_epoch", None)):
-            self.ranger.feed.invalidate()
+            self.ranger.invalidate_support()
             self.ranger.turn = 0.
             self.ranger.active = False
-            self.ranger.candidate = None
+            self.ranger.takeover_wait = None
             self.ranger.publish_active()
         if self.owner and correction_pending(self.geo, getattr(self, "handled_recovery", 0),
                                              getattr(self, "handled_epoch", None)):
