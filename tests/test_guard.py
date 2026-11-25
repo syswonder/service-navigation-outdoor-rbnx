@@ -141,7 +141,7 @@ def test_auto_ranger_tracks_flat_limits_a_crest_and_stops_on_depth_loss():
     n.descent_at = -math.inf
     n.ranger_yaw_rate = 0.
     n.config.update(ranger_descent_enabled=True, ranger_depth_timeout_s=.35,
-                    ranger_brake_mps2=.55, ranger_actuation_latency_s=.10)
+                    ranger_brake_mps2=.55, ranger_actuation_latency_s=.10, footprint_radius_m=.24)
     axes = (np.arange(SIZE) - SIZE // 2) * CELL
     support = SupportMask(np.ones((SIZE, SIZE), dtype=bool),
                           (axes[0] - CELL/2.,) * 2, CELL, 10., .24)

@@ -153,14 +153,16 @@ class Watchdog(Node):
         descent = now - self.descent_at < self.config["command_timeout_s"]
         latency = self.config["ranger_depth_timeout_s"] + .05 + self.config["ranger_actuation_latency_s"]
         decel = self.config["ranger_brake_mps2"]
-        horizon = max(1.2, abs(measured) * latency + measured**2 / (2 * decel) + .55)
+        radius = self.config["footprint_radius_m"]
+        stopping = abs(measured) * latency + measured**2 / (2 * decel)
+        horizon = radius + max(.9, stopping + .55)
         available, reason = horizon, "ranger_ground_unconfirmed"
         for points in braking_paths(xy, yaw, speed, turn, abs(measured), self.ranger_yaw_rate, horizon):
             profile = support.profile(xy, points, heights)
             distance = profile.supported_m
             why = profile.reason
             if not descent and profile.crest_m is not None:
-                distance, why = min(distance, profile.crest_m), "ranger_crest"
+                distance, why = min(distance, max(0., profile.crest_m - radius)), "ranger_crest"
             if distance < available:
                 available, reason = distance, why
         if descent and measured > SEGMENT_SPEED:

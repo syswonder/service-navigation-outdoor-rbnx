@@ -100,7 +100,8 @@ class RangerDescent:
         except (TransformException, ValueError):
             self.candidate = None
             return None
-        if profile.crest_m is None or profile.crest_m > .65 or profile.landing is None:
+        approach = self.node.config["footprint_radius_m"] + .50
+        if profile.crest_m is None or profile.crest_m > approach or profile.landing is None:
             self.candidate = None
             return None
         previous = self.candidate
