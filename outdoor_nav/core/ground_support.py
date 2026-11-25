@@ -1,6 +1,7 @@
 """Bounded online ground observations and full-footprint support checks."""
 
 import math
+from dataclasses import dataclass
 
 import cv2
 import numpy as np
@@ -9,6 +10,7 @@ DEPTH_TOPIC = "/outdoor/ranger/registered_depth"
 GRID_TOPIC = "/outdoor/ranger/ground_support"
 HEIGHT_TOPIC = "/outdoor/ranger/ground_height"
 ACK_TOPIC = "/outdoor/ranger/ground_support_ack"
+DESCENT_ACTIVE_TOPIC = "/outdoor/ranger/descent_active"
 CELL = .16
 SIZE = 101
 FRAME = "odom"
@@ -28,6 +30,7 @@ class GroundGrid:
         self.height = np.full((SIZE, SIZE), np.nan)
         self.observed = np.full((SIZE, SIZE), -np.inf)
         self.rough = np.zeros((SIZE, SIZE), dtype=bool)
+        self.hazard = np.zeros_like(self.rough)
 
     def reset(self, xy, ground, stamp):
         self.origin = np.asarray(xy) - (SIZE // 2 + .5) * CELL
@@ -41,7 +44,7 @@ class GroundGrid:
         self.height[sl, sl][footprint] = ground
         self.observed[sl, sl][footprint] = stamp
 
-    def update(self, xy, ground, points, stamp):
+    def update(self, xy, ground, points, stamp, max_cell_age=45.):
         if self.origin is None:
             self.reset(xy, ground, stamp)
         # Recenter by whole cells, retaining only still-in-window observations.
@@ -87,7 +90,7 @@ class GroundGrid:
         rows, cols = np.indices(self.height.shape)
         near = np.hypot(self.origin[0]+(cols+.5)*CELL-xy[0],
                         self.origin[1]+(rows+.5)*CELL-xy[1])
-        expired = (stamp - self.observed > 45.) | (near > 7.5)
+        expired = (stamp - self.observed > max_cell_age) | (near > 7.5)
         # The occluded cells currently below the chassis already supported its
         # approach. Keep their actual heights while occupied.
         occupied = (near <= self.radius + CELL / math.sqrt(2)) & np.isfinite(self.height) & ~self.rough
@@ -108,6 +111,7 @@ class GroundGrid:
             steep &= abs(heights[-1] - heights[0]) > self.grade * CELL * math.hypot(dx, dy) * 3 + .02
             hazard[bands[1]] |= steep
             hazard[bands[2]] |= steep
+        self.hazard = hazard
         return np.isfinite(self.height) & ~hazard
 
     @staticmethod
@@ -117,11 +121,13 @@ class GroundGrid:
 
 
 class SupportMask:
-    def __init__(self, cells, origin, resolution, stamp, radius):
+    def __init__(self, cells, origin, resolution, stamp, radius, hazards=None):
         self.cells, self.origin, self.resolution, self.stamp = cells, np.asarray(origin), resolution, stamp
         kernel = disk(radius + resolution / math.sqrt(2), resolution)
         self.safe = cv2.erode(cells.astype(np.uint8), kernel, borderType=cv2.BORDER_CONSTANT,
                               borderValue=0).astype(bool)
+        self.hazard = (cv2.dilate(hazards.astype(np.uint8), kernel).astype(bool)
+                       if hazards is not None else None)
 
     def clear(self, points, allowed=None):
         points = np.asarray(points)
@@ -142,6 +148,42 @@ class SupportMask:
             start = end
         return True
 
+    def profile(self, start, points, heights, limit=8., landing_distance=.70):
+        """Sample the forward route up to the first unsupported footprint."""
+        if heights is None or not self.clear([start]):
+            return GroundProfile(0.)
+        xy = np.asarray(start, dtype=float)
+        distance, samples, levels = [0.], [xy], [self.level(xy, heights)]
+        reason = "observed_path_ends"
+        for end in points:
+            end = np.asarray(end, dtype=float)
+            length = math.dist(xy, end)
+            if length <= 1e-6:
+                continue
+            count = math.ceil(length / (self.resolution * .25))
+            for offset in np.linspace(0., 1., count + 1)[1:]:
+                sample = xy + offset * (end - xy)
+                traveled = distance[-1] + math.dist(samples[-1], sample)
+                if traveled > limit or not self.clear([sample]):
+                    reason = self.blocked_reason(sample) if traveled <= limit else reason
+                    return ground_profile(distance, samples, levels, reason, landing_distance)
+                distance.append(traveled)
+                samples.append(sample)
+                levels.append(self.level(sample, heights))
+            xy = end
+        return ground_profile(distance, samples, levels, reason, landing_distance)
+
+    def level(self, xy, heights):
+        x, y = np.floor((xy - self.origin) / self.resolution).astype(int)
+        return float(heights[y, x])
+
+    def blocked_reason(self, xy):
+        x, y = np.floor((xy - self.origin) / self.resolution).astype(int)
+        if (self.hazard is not None and 0 <= y < self.safe.shape[0] and 0 <= x < self.safe.shape[1]
+                and self.hazard[y, x]):
+            return "ground_hazard"
+        return "ground_unobserved"
+
     def permits(self, xy, yaw, speed, turn, measured_speed, config):
         if not all(map(math.isfinite, (*xy, yaw, speed, turn, measured_speed))):
             return False
@@ -158,3 +200,64 @@ class SupportMask:
         arc = np.column_stack((np.cos(angle), np.sin(angle))) * s[:, None] + xy
         straight = np.column_stack((np.cos(yaw)*s, np.sin(yaw)*s)) + xy
         return self.clear(arc) and self.clear(straight)
+
+
+@dataclass(frozen=True)
+class GroundProfile:
+    supported_m: float
+    crest_m: float | None = None
+    crest: tuple | None = None
+    landing: tuple | None = None
+    reason: str = "ground_unobserved"
+
+
+def ground_profile(distance, points, levels, reason, landing_distance):
+    """Recognize a sustained drop followed by a contiguous flat landing."""
+    distance, levels = np.asarray(distance), np.asarray(levels)
+    crest = None
+    last_drop = None
+    for index, far in enumerate(distance):
+        near = np.searchsorted(distance, far - .55)
+        drop = levels[near] - levels[index]
+        if far >= .45 and drop >= .035:
+            changes = -np.diff(levels[near:index + 1])
+            gradual = (np.count_nonzero(changes >= .006) >= 2
+                       and changes.max() <= max(.032, .75 * drop)
+                       and not (changes < -.02).any())
+            if gradual:
+                if crest is None:
+                    crest = near
+                last_drop = index
+            elif changes.max() >= .04:
+                return GroundProfile(float(distance[near]), reason="ground_drop_discontinuous")
+        if last_drop is not None and far - distance[last_drop] >= landing_distance:
+            start = np.searchsorted(distance, far - landing_distance)
+            if np.ptp(levels[start:index + 1]) <= .035:
+                return GroundProfile(float(distance[-1]), float(distance[crest]), tuple(points[crest]),
+                                     tuple(points[index]), reason)
+    if crest is None:
+        return GroundProfile(float(distance[-1]), reason=reason)
+    return GroundProfile(float(distance[-1]), float(distance[crest]), tuple(points[crest]), reason=reason)
+
+
+def braking_speed(available, measured, requested, latency, deceleration):
+    """Limit speed to a stopping corridor. Zero requests immediate braking."""
+    distance = available - .04
+    if distance <= 0. or measured * latency + measured**2 / (2 * deceleration) >= distance:
+        return 0.
+    cap = math.sqrt((deceleration * latency)**2 + 2 * deceleration * distance) - deceleration * latency
+    return min(requested, cap)
+
+
+def braking_paths(xy, yaw, speed, turn, measured, measured_turn, horizon):
+    """Check the commanded turn, the measured turn while braking, and straight."""
+    step = CELL * .25
+    distance = np.linspace(0., horizon, math.ceil(horizon / step) + 1)
+    measured_curvature = measured_turn / measured if measured > .01 else 0.
+    for curvature in (turn / max(speed, .01), measured_curvature, 0.):
+        if abs(curvature) < 1e-4:
+            offsets = np.column_stack((np.cos(yaw) * distance, np.sin(yaw) * distance))
+        else:
+            angles = yaw + curvature * distance
+            offsets = np.column_stack((np.sin(angles) - np.sin(yaw), np.cos(yaw) - np.cos(angles))) / curvature
+        yield offsets[1:] + xy

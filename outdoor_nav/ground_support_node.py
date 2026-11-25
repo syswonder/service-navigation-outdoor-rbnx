@@ -78,8 +78,11 @@ class SupportFeed:
         cells = np.asarray(msg.data).reshape(SIZE, SIZE) == 0
         stamp = seconds(msg.header.stamp)
         if stamp > self.invalid_before:
+            if self.snapshot is not None and stamp <= self.snapshot[0].stamp:
+                return
             sample = SupportMask(cells, (info.origin.position.x, info.origin.position.y),
-                                 info.resolution, stamp, self.config["footprint_radius_m"])
+                                 info.resolution, stamp, self.config["footprint_radius_m"],
+                                 hazards=np.asarray(msg.data).reshape(SIZE, SIZE) == 100)
             self.snapshot = sample, time.monotonic()
 
     def fresh(self):
@@ -98,6 +101,7 @@ class GroundSupport(Node):
     def __init__(self, runtime):
         super().__init__("ranger_ground_support")
         self.p = runtime["policy"]
+        self.auto = self.p.get("ranger_descent_mode") == "auto"
         self.tf = Buffer()
         self.listener = TransformListener(self.tf, self)
         self.grid = GroundGrid(self.p["ranger_step_limit_m"],
@@ -167,9 +171,14 @@ class GroundSupport(Node):
             depth, raw = self.points(msg), self.points(lidar)
             if not len(depth) or not len(raw):
                 raise ValueError("Empty depth or raw lidar")
-            supported = self.grid.update(xy, ground, np.concatenate((depth, raw)), stamp)
+            supported = self.grid.update(
+                xy, ground, depth if self.auto else np.concatenate((depth, raw)), stamp,
+                self.p["ranger_ground_cell_timeout_s"] if self.auto else 45.,
+            )
+            hazards = self.grid.hazard
         except (TransformException, ValueError, TypeError, AssertionError):
             supported = np.zeros((SIZE, SIZE), dtype=bool)
+            hazards = np.zeros_like(supported)
         if self.grid.origin is None:
             return
         output = OccupancyGrid()
@@ -179,7 +188,8 @@ class GroundSupport(Node):
         output.info.width = output.info.height = SIZE
         output.info.origin.position.x, output.info.origin.position.y = map(float, self.grid.origin)
         output.info.origin.orientation.w = 1.
-        output.data = np.where(supported, 0, 100).astype(np.int8).ravel().tolist()
+        output.data = np.where(supported, 0, np.where(hazards, 100, -1) if self.auto else 100
+                               ).astype(np.int8).ravel().tolist()
         heights = np.where(supported, self.grid.height, np.nan).astype("<f4")
         self.height_pub.publish(Image(header=output.header, height=SIZE, width=SIZE,
                                       encoding="32FC1", step=SIZE*4, data=heights.tobytes()))

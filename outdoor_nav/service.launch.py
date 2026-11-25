@@ -1,6 +1,7 @@
 """Pure deployment launch: no localizer, drivers, static map or business server."""
 
 import json
+from copy import deepcopy
 from pathlib import Path
 import sys
 import yaml
@@ -29,7 +30,7 @@ def nodes(context):
     # Never reconstruct costmaps, controllers or overwrite the robot's tuning.
     params = runtime["nav2_params"]
     ranger = robot.get("ranger_descent_enabled", False)
-    if ranger:
+    if ranger and robot["ranger_descent_mode"] == "staged":
         from outdoor_nav.core.ground_support import ACK_TOPIC, GRID_TOPIC
         from outdoor_nav.core.ground_support import SEGMENT_SPEED
         params["planner_server"]["ros__parameters"]["GridBased"].update(allow_unknown=False, tolerance=0.)
@@ -51,6 +52,20 @@ def nodes(context):
         # Limit the plugin's full-window merge to a near-field rolling map.
         params["global_costmap"]["global_costmap"]["ros__parameters"].update(
             rolling_window=True, width=16, height=16)
+    elif ranger:
+        from outdoor_nav.core.ground_support import SEGMENT_SPEED
+        controller = params["controller_server"]["ros__parameters"]
+        descent = deepcopy(controller["FollowPath"])
+        for key in ("max_vel_x", "max_speed_xy"):
+            descent[key] = min(descent[key], SEGMENT_SPEED)
+        for key in ("xy_goal_tolerance", "RotateToGoal.xy_goal_tolerance"):
+            descent[key] = min(descent.get(key, .15), .15)
+        controller["controller_plugins"].append("RangerFollowPath")
+        controller["RangerFollowPath"] = descent
+        checker = deepcopy(controller["goal_checker"])
+        checker["xy_goal_tolerance"] = min(checker.get("xy_goal_tolerance", .25), .17)
+        controller["goal_checker_plugins"].append("ranger_goal_checker")
+        controller["ranger_goal_checker"] = checker
     output = Path(runtime["run_dir"])
     output.mkdir(parents=True, exist_ok=True)
     effective = output / "effective_nav2.yaml"

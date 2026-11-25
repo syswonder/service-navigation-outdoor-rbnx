@@ -707,12 +707,12 @@ class Executor(Node):
             controller_used = None
             recovery_used = (getattr(self, "handled_recovery", 0), getattr(self, "handled_epoch", None))
             ranger = getattr(self, "ranger", None)
-            if ranger is not None:
+            if ranger is not None and not ranger.auto:
                 completion_pose = await ranger.run(
                     task_id, goal_point, guidance, tolerance, follow_requests, follow_results
                 )
                 outcome, stop_confirmed = "succeeded", True
-            while ranger is None:
+            while ranger is None or ranger.auto:
                 if self.interrupted(task_id):
                     raise InterruptedError("Task canceled or superseded")
                 position = await self.wait_for_ready_pose(task_id)
@@ -724,6 +724,15 @@ class Executor(Node):
                     budget = ProgressBudget(planner_patience_s=policy.get("planner_patience_s", 0.0),
                                             controller_patience_s=policy.get("controller_patience_s", 20.0))
                     recovery_used = recovery
+                if ranger is not None:
+                    target = ranger.downhill_candidate(position, current_points)
+                    if target is not None:
+                        await ranger.descend(task_id, target, follow_requests, follow_results)
+                        self.raw_command, self.raw_received = Twist(), 0.
+                        current_points, follow_result, sent_window = [], None, None
+                        budget = ProgressBudget(planner_patience_s=policy.get("planner_patience_s", 0.0),
+                                                controller_patience_s=policy.get("controller_patience_s", 20.0))
+                        continue
                 controller_id = self.controller_id()
                 if controller_used is not None and controller_id != controller_used:
                     self.stopping = True

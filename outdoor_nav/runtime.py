@@ -319,6 +319,9 @@ class OutdoorExecutor(Executor):
                 self.command_pub.publish(Twist())
 
     def safety_tick(self):
+        ranger = getattr(self, "ranger", None)
+        if ranger is not None:
+            ranger.publish_active()
         if correction_pending(self.geo, getattr(self, "handled_recovery", 0),
                               getattr(self, "handled_epoch", None)):
             self.command_pub.publish(Twist())
@@ -326,7 +329,6 @@ class OutdoorExecutor(Executor):
         if getattr(self, "cycle", None) is not None and not self.cycle.allowed():
             self.command_pub.publish(Twist())
             return
-        ranger = getattr(self, "ranger", None)
         if ranger is not None and ranger.turn:
             task = self.tasks.snapshot(self.owner, include_paths=False) if self.owner else None
             command = Twist()
@@ -431,6 +433,9 @@ class OutdoorExecutor(Executor):
                                                           getattr(self, "handled_epoch", None)):
             self.ranger.feed.invalidate()
             self.ranger.turn = 0.
+            self.ranger.active = False
+            self.ranger.candidate = None
+            self.ranger.publish_active()
         if self.owner and correction_pending(self.geo, getattr(self, "handled_recovery", 0),
                                              getattr(self, "handled_epoch", None)):
             self.stopping = True
@@ -653,20 +658,31 @@ class OutdoorExecutor(Executor):
         tolerance = self.tasks.snapshot(task_id)["arrival_tolerance_m"]
         if tolerance is None:
             raise RuntimeError("Task has no GNSS acceptance policy")
-        if not self.controller_parameters.service_is_ready():
-            raise RuntimeError("Controller parameter service is unavailable")
-        req = SetParametersAtomically.Request()
-        req.parameters = [
-            Parameter(
-                "goal_checker.xy_goal_tolerance",
-                value=float(min(tolerance, .17 if getattr(self, "ranger", None) is not None else .5))
-            ).to_parameter_msg()
-        ]
-        result = await self.result(self.controller_parameters.call_async(req), task_id)
-        if not result.result.successful:
-            raise RuntimeError("Controller rejected the task arrival tolerance")
+        configured = self.config["controller_goal_tolerance_m"]
+        ranger = getattr(self, "ranger", None)
+        effective = min(tolerance, configured, .17) if ranger is not None and not ranger.auto else min(tolerance, configured)
+        if effective < configured or getattr(self, "controller_tolerance_overridden", False):
+            self.controller_tolerance_overridden = True
+            await self.set_goal_tolerance(task_id, "goal_checker", effective)
+            self.controller_tolerance_overridden = effective < configured
         if getattr(self, "terrain", None) is not None:
             self.terrain.prepared_task = task_id
+
+    async def prepare_ranger_segment(self, task_id):
+        tolerance = self.tasks.snapshot(task_id)["arrival_tolerance_m"]
+        effective = min(tolerance, self.config["controller_goal_tolerance_m"], .17)
+        await self.set_goal_tolerance(task_id, "ranger_goal_checker", effective)
+
+    async def set_goal_tolerance(self, task_id, checker, tolerance):
+        if not self.controller_parameters.service_is_ready():
+            raise RuntimeError("Controller parameter service is unavailable")
+        request = SetParametersAtomically.Request()
+        request.parameters = [
+            Parameter(f"{checker}.xy_goal_tolerance", value=float(tolerance)).to_parameter_msg()
+        ]
+        result = await self.result(self.controller_parameters.call_async(request), task_id)
+        if not result.result.successful:
+            raise RuntimeError(f"Controller rejected the arrival tolerance for {checker}")
 
     async def guided_path(self, guidance, window, position, task_id):
         if self.controller_id() != "StairsFollowPath":

@@ -7,21 +7,103 @@ from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, Twist
 from nav2_msgs.action import ComputePathToPose, FollowPath
 from rclpy.time import Time
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 from tf2_ros import TransformException
 
 from .core.descent import Survey
-from .core.ground_support import ACK_TOPIC, FRAME
+from .core.ground_support import ACK_TOPIC, DESCENT_ACTIVE_TOPIC, FRAME
 from .ground_support_node import SupportFeed, latest_base, xy_yaw
 
 
 class RangerDescent:
     def __init__(self, node):
         self.node = node
+        self.auto = node.config.get("ranger_descent_mode") == "auto"
         self.feed = SupportFeed(node, node.config, node.tf, with_heights=True)
         self.turn = 0.
         self.ack = None
-        node.create_subscription(String, ACK_TOPIC, self.on_ack, 10)
+        self.candidate = None
+        self.active = False
+        if self.auto:
+            self.active_pub = node.create_publisher(Bool, DESCENT_ACTIVE_TOPIC, 1)
+        else:
+            node.create_subscription(String, ACK_TOPIC, self.on_ack, 10)
+
+    def publish_active(self):
+        if self.auto:
+            self.active_pub.publish(Bool(data=self.active))
+
+    def downhill_candidate(self, position, points):
+        if len(points) < 2:
+            self.candidate = None
+            return None
+        sample = self.feed.fresh()
+        if sample is None:
+            self.candidate = None
+            return None
+        heights = self.feed.elevation(sample)
+        if heights is None:
+            return None
+        try:
+            xy, _ = self.pose()
+            pose = position["x"], position["y"]
+            route = [(p["x"], p["y"]) for p in points]
+            index = min(range(len(route)), key=lambda i: math.dist(pose, route[i]))
+            profile = sample.profile(xy, self.transform_points(FRAME, "map", route[index+1:]), heights)
+        except (TransformException, ValueError):
+            self.candidate = None
+            return None
+        if profile.crest_m is None or profile.crest_m > .65 or profile.landing is None:
+            self.candidate = None
+            return None
+        previous = self.candidate
+        self.candidate = sample.stamp, profile.crest
+        if (previous is not None and 0 < sample.stamp - previous[0] <= self.node.config["ranger_depth_timeout_s"]
+                and math.dist(profile.crest, previous[1]) <= .25):
+            return profile.landing
+        return None
+
+    async def descend(self, task, target, requests, results):
+        node = self.node
+        self.candidate = None
+        node.stopping = True
+        node.command_pub.publish(Twist())
+        if not await node.release_controller(requests, results) or not await node.confirm_stop():
+            raise RuntimeError("Cannot confirm stopped controller before Ranger descent")
+        requests.clear()
+        results.clear()
+        _, (xy, _) = await self.wait_support(task, 1.25)
+        planned = await self.path(task, xy, target, None, "descent", None)
+        if planned is None:
+            raise RuntimeError("Ranger descent has no fully supported path; stopped")
+        path, points = planned
+        await node.prepare_ranger_segment(task)
+        try:
+            if not await self.follow(task, path, points, requests, results, "descent", None):
+                raise RuntimeError("Ranger descent segment did not complete; stopped")
+        finally:
+            self.active = False
+            self.publish_active()
+        await self.confirm_landing(task, target, points)
+
+    async def confirm_landing(self, task, target, points):
+        node = self.node
+        anchor = next((point for point in reversed(points) if math.dist(point, target) >= .4), points[0])
+        heading = math.atan2(target[1] - anchor[1], target[0] - anchor[0])
+        deadline = time.monotonic() + node.config["navigation_recovery_timeout_s"]
+        previous = None
+        while time.monotonic() < deadline:
+            sample, (_, heights, xy, level) = await self.wait_support(task, 1.25, need_heights=True)
+            probe = xy[0] + .45 * math.cos(heading), xy[1] + .45 * math.sin(heading)
+            if (math.dist(xy, target) <= .30 and sample.corridor(xy, [probe])
+                    and abs(sample.level(probe, heights) - level) <= .035):
+                if previous is not None and 0 < sample.stamp - previous <= node.config["ranger_depth_timeout_s"]:
+                    return
+                previous = sample.stamp
+            else:
+                previous = None
+            await node.pause(.05)
+        raise RuntimeError("Ranger flat landing is not confirmed; stopped")
 
     def on_ack(self, msg):
         source, _, stamp = msg.data.rpartition(":")
@@ -94,11 +176,13 @@ class RangerDescent:
             raise RuntimeError("Could not confirm stop after Ranger observation")
 
     def transform(self, target, source, xy):
+        return self.transform_points(target, source, [xy])[0]
+
+    def transform_points(self, target, source, points):
         tf = self.node.tf.lookup_transform(target, source, Time())
         translation, yaw = xy_yaw(tf)
-        x, y = xy
-        return (translation[0]+math.cos(yaw)*x-math.sin(yaw)*y,
-                translation[1]+math.sin(yaw)*x+math.cos(yaw)*y)
+        c, s = math.cos(yaw), math.sin(yaw)
+        return [(translation[0]+c*x-s*y, translation[1]+s*x+c*y) for x, y in points]
 
     def stamped(self, point, yaw, frame):
         pose = PoseStamped()
@@ -116,7 +200,7 @@ class RangerDescent:
             return None
         requested_stamp = sample.stamp
         deadline = time.monotonic() + .6
-        while self.ack is None or self.ack < requested_stamp:
+        while not self.auto and (self.ack is None or self.ack < requested_stamp):
             if time.monotonic() >= deadline:
                 self.report("navfn_no_path", xy, target, "costmap did not acknowledge current support")
                 return None
@@ -151,8 +235,8 @@ class RangerDescent:
         if result.status != GoalStatus.STATUS_SUCCEEDED or len(path.poses) < 2:
             self.report("navfn_no_path", xy, target, f"status={result.status} poses={len(path.poses)}")
             return None
-        points = [self.transform(FRAME, path.header.frame_id,
-                                 (pose.pose.position.x, pose.pose.position.y)) for pose in path.poses]
+        points = self.transform_points(FRAME, path.header.frame_id,
+                                       [(pose.pose.position.x, pose.pose.position.y) for pose in path.poses])
         if math.dist(points[-1], target) > .2:
             self.report("path_recheck_failed", xy, target, "NavFn endpoint missed the candidate")
             return None
@@ -187,8 +271,16 @@ class RangerDescent:
         if not self.route_supported(sample, xy, points, phase, platform_z):
             self.report("path_recheck_failed", xy, points[-1], "path changed before tracking")
             return False
+        if self.auto:
+            profile = sample.profile(xy, points, self.feed.elevation(sample), landing_distance=.45)
+            if profile.landing is None:
+                self.report("path_recheck_failed", xy, points[-1], "continuous descent and landing not confirmed")
+                return False
+            self.active = True
         command = FollowPath.Goal()
-        command.path, command.controller_id, command.goal_checker_id = path, "FollowPath", "goal_checker"
+        command.path = path
+        command.controller_id = "RangerFollowPath" if self.auto else "FollowPath"
+        command.goal_checker_id = "ranger_goal_checker" if self.auto else "goal_checker"
         node.raw_command, node.raw_received = Twist(), 0.
         pending = node.follow_client.send_goal_async(command)
         requests.append(pending)

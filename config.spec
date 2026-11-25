@@ -133,7 +133,12 @@ properties:
       ranger_descent_enabled:
         type: boolean
         default: false
-        description: Require live Ranger ground support for continuous navigation.
+        description: Require live ground support and enable Ranger descent.
+      ranger_descent_mode:
+        type: string
+        enum: [auto, staged]
+        default: auto
+        description: Follow normally and switch on a confirmed ramp, or use legacy staged navigation.
       ranger_step_limit_m:
         type: number
         default: 0.075
@@ -146,6 +151,14 @@ properties:
       ranger_depth_timeout_s:
         type: number
         default: 0.35
+      ranger_ground_cell_timeout_s:
+        type: number
+        default: 2.0
+        description: Maximum age of unoccupied ground evidence in auto mode.
+      ranger_actuation_latency_s:
+        type: number
+        default: 0.10
+        description: Extra braking delay for the command path and chassis in auto mode.
       lidar_enabled:
         type: boolean
         default: true

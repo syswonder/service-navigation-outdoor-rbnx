@@ -169,7 +169,8 @@ def trial(args):
             "topic_remap": {"tf": "/tf", "scan": SCAN},
             "policy": {
                 **dict.fromkeys(confirmations, True),
-                "ranger_descent_enabled": enabled, "motion_enabled": True, "require_chassis_ready": False,
+                "ranger_descent_enabled": enabled, "ranger_descent_mode": "staged",
+                "motion_enabled": True, "require_chassis_ready": False,
                 "localization_mode": "external_odom", "heading_source": "configured",
                 "fixed_arrival_m": .25 if enabled else .40,
                 "float_arrival_m": .25 if enabled else .40, "footprint_radius_m": world.radius,

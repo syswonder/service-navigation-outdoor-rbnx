@@ -3,7 +3,7 @@ import math
 import numpy as np
 
 from outdoor_nav.core.descent import Survey
-from outdoor_nav.core.ground_support import CELL, SIZE, GroundGrid, SupportMask
+from outdoor_nav.core.ground_support import CELL, SIZE, GroundGrid, SupportMask, braking_speed
 
 
 def terrain(drop=False, hole=False):
@@ -78,3 +78,41 @@ def test_survey_can_continue_on_lower_landing_but_cannot_scout_across_drop():
     heights = np.where(support.cells, -.68, np.nan)
     choices = survey.staged_candidates(support, heights, (0., 0.), (4., 0.), 0., -.68)
     assert choices and choices[0][0] == "descent"
+
+
+def test_auto_profile_distinguishes_a_ramp_landing_from_a_step_or_unknown():
+    x, y = np.meshgrid(np.arange(-1., 3.1, .03), np.arange(-1., 1.1, .03))
+    ramp = -.16 * np.clip(x - .55, 0., .85)
+    points = np.column_stack((x.ravel(), y.ravel(), ramp.ravel()))
+    grid, support = observed(points)
+    profile = support.profile((0., 0.), [(2.7, 0.)], grid.height)
+    assert .15 < profile.crest_m < .8
+    assert profile.landing[0] > 1.9
+
+    grid, support = observed(points[points[:, 0] < 1.5])
+    profile = support.profile((0., 0.), [(2.7, 0.)], grid.height)
+    assert profile.crest is not None and profile.landing is None
+    assert profile.reason == "ground_unobserved"
+
+    points[:, 2] = np.where(points[:, 0] < .8, 0., -.06)
+    grid, support = observed(points)
+    profile = support.profile((0., 0.), [(2.7, 0.)], grid.height)
+    assert profile.reason == "ground_drop_discontinuous"
+    assert profile.landing is None
+    assert profile.supported_m < .8
+
+
+def test_auto_grid_new_frame_does_not_refresh_old_forward_ground():
+    grid, _ = observed(terrain())
+    points = terrain()
+    off_route = points[points[:, 1] > .6]
+    cells = grid.update((0., 0.), 0., off_route, 3.1, max_cell_age=2.)
+    support = SupportMask(cells, grid.origin, CELL, 3.1, .24)
+    assert support.clear([(0., 0.)])
+    assert not support.corridor((0., 0.), [(1., 0.)])
+
+
+def test_auto_braking_uses_measured_speed_and_remaining_ground():
+    assert braking_speed(.8, .4, .4, .5, .55) == .4
+    assert braking_speed(.26, .4, .22, .5, .55) == 0.
+    assert 0. < braking_speed(.26, .18, .4, .5, .55) < .4
