@@ -28,7 +28,7 @@ from std_msgs.msg import String, UInt32
 from tf2_ros import Buffer, TransformListener
 
 from .configuration import load_runtime
-from .core.scan_health import healthy_scan
+from .core.scan_health import acquisition_monotonic, acquisition_time, healthy_scan
 from .core.gait import GaitSchedule, STAIRS, chassis_prepared
 from .core.scan_gate import stairs_obstacle_off
 from std_srvs.srv import Empty
@@ -405,7 +405,7 @@ class OutdoorExecutor(Executor):
                 was_stopping = True
                 continue
             if getattr(self, "terrain", None) is not None:
-                if self.terrain.result["failed"]:
+                if self.terrain.task_id == task_id and self.terrain.result["failed"]:
                     raise RuntimeError("Terrain supervisor stopped: " + self.terrain.result["reason"])
                 return position
             self.gait_tick()
@@ -458,21 +458,25 @@ class OutdoorExecutor(Executor):
             setattr(self, name, {})
 
     def on_scan(self, msg):
-        self.scan, self.scan_at = msg, time.monotonic()
-        if healthy_scan(
-            msg,
-            self.get_clock().now().nanoseconds / 1e9,
-            self.config["sensor_timeout_s"],
-        ):
-            self.mark("lidar")
+        now_s = self.get_clock().now().nanoseconds / 1e9
+        if not healthy_scan(msg, now_s, self.config["sensor_timeout_s"]):
+            return
+        if self.scan is not None and acquisition_time(msg) <= acquisition_time(self.scan):
+            return
+        self.scan = msg
+        self.scan_at = acquisition_monotonic(msg, now_s, time.monotonic())
+        self.stats["lidar"] = self.scan_at
 
     def on_camera_scan(self, msg):
         if not msg.header.frame_id:
             self.stats["camera"] = -math.inf
             return
-        if healthy_scan(msg, self.get_clock().now().nanoseconds / 1e9,
+        now_s = self.get_clock().now().nanoseconds / 1e9
+        if healthy_scan(msg, now_s,
                         self.config["sensor_timeout_s"], allow_filtered_empty=True):
-            self.mark("camera")
+            acquired = acquisition_monotonic(msg, now_s, time.monotonic())
+            self.stats["camera"] = max(self.stats.get("camera", -math.inf), acquired)
+
     def stairs_active(self):
         task = self.tasks.snapshot(self.owner, include_paths=False) if self.owner else None
         return stairs_obstacle_off(
@@ -516,7 +520,8 @@ class OutdoorExecutor(Executor):
             for k, limit in (("lidar", t), ("global_map", 3), ("local_map", t))
         }
         health["lidar"] = not c.get("lidar_enabled", True) or health["lidar"]
-        health["camera"] = not c.get("camera_enabled", False) or now-self.stats.get("camera", -math.inf) < t
+        health["camera"] = not (c.get("camera_enabled", False)
+                                and c.get("camera_geometry_enabled", True)) or now-self.stats.get("camera", -math.inf) < t
         health.update(
             localization=continuation_allowed(g, owned, c["allow_float_during_fixed_task"])
             and now-self.geo_at < c.get('localization_timeout_s', 3.0),

@@ -43,7 +43,7 @@ def vision_nodes(runtime, python, rosargs):
     import json
     segmentation = dict(config_json=json.dumps(runtime["semantic_segmentation"]),
                         rgb_topic=t["camera_rgb"], mask_topic=t["camera_road_mask"],
-                        labels_topic=t["camera_labels"], confidence_topic=t["camera_confidence"],
+                        labels_topic=t["camera_labels"],
                         status_topic=t["camera_segmentation_status"], overlay_topic=t["camera_overlay"],
                         max_image_age=p["sensor_timeout_s"])
     children = []

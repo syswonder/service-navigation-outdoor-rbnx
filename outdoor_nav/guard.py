@@ -6,7 +6,7 @@ import time
 import signal
 from rclpy.signals import SignalHandlerOptions
 from .configuration import load_runtime
-from .core.scan_health import healthy_scan
+from .core.scan_health import acquisition_monotonic, healthy_scan
 
 import rclpy
 from geometry_msgs.msg import Twist
@@ -97,7 +97,7 @@ class Watchdog(Node):
     def scan(self, msg):
         now_s = self.get_clock().now().nanoseconds / 1e9
         if healthy_scan(msg, now_s, self.config["sensor_timeout_s"]):
-            self.scan_at = time.monotonic()
+            self.scan_at = max(self.scan_at, acquisition_monotonic(msg, now_s, time.monotonic()))
 
     def ranger_odometry(self, msg):
         from .ground_support_node import seconds
@@ -183,7 +183,11 @@ class Watchdog(Node):
             "localization_unready": self.ready,
             "localization_stale": now - self.geo_at < self.config.get("localization_timeout_s", 3.0),
             "scan_stale": not self.config.get("lidar_enabled", True) or now - self.scan_at < self.config["sensor_timeout_s"],
-            "camera_stale": not self.config.get("camera_enabled", False) or now-getattr(self, "camera_at", 0) < self.config["sensor_timeout_s"],
+            # The camera obstacle scan only exists when the depth-geometry chain
+            # runs; segmentation-only camera use does not publish one.
+            "camera_stale": not (self.config.get("camera_enabled", False)
+                                 and self.config.get("camera_geometry_enabled", True))
+                             or now-getattr(self, "camera_at", 0) < self.config["sensor_timeout_s"],
             "command_stale": now - self.command_at < self.config["command_timeout_s"],
         }
         blockers = [reason for reason, passed in checks.items() if not passed]
@@ -232,9 +236,10 @@ class Watchdog(Node):
         if not msg.header.frame_id:
             self.camera_at = -math.inf
             return
-        if healthy_scan(msg, self.get_clock().now().nanoseconds / 1e9,
+        now_s = self.get_clock().now().nanoseconds / 1e9
+        if healthy_scan(msg, now_s,
                         self.config["sensor_timeout_s"], allow_filtered_empty=True):
-            self.camera_at = time.monotonic()
+            self.camera_at = max(self.camera_at, acquisition_monotonic(msg, now_s, time.monotonic()))
 
     def destroy_node(self):
         if rclpy.ok():

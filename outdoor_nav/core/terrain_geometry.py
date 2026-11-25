@@ -20,33 +20,62 @@ def forward_mask(points, max_range, half_width=None):
     return keep
 
 
-def stair_front(points, parameters):
-    """Fit the nearest visible stair edge; normal, not image-centre bearing.
+def stair_heading(points, parameters):
+    """Estimate uphill direction from the whole flight's principal components.
 
-    Robust percentile band + PCA line fit; reject insufficient width, a thick
-    patch or an ambiguous line. Direction requires measured positive elevation.
+    The smallest component is the slope-plane normal. Its horizontal gradient
+    resolves uphill without assuming the longest component spans stair width.
     """
     p = np.asarray(points, float).reshape(-1, 3)
+    p = p[np.isfinite(p).all(axis=1)]
     result = dict(stairs=len(p) >= parameters['min_stair_points'], direction='unknown', heading_yaw=None)
     if not result['stairs']:
         return result
     if np.percentile(p[:, 2], 75) - parameters['ground_z_m'] < parameters['min_stair_rise_m']:
         return result
-    result['direction'] = 'up'
-    front = p[p[:, 0] <= np.percentile(p[:, 0], 5) + parameters['front_band_m'], :2]
-    if len(front) < parameters['min_stair_points']:
+    centered = p - p.mean(axis=0)
+    values, vectors = np.linalg.eigh(np.cov(centered.T))
+    if values[1] <= 0 or values[1] < 4 * max(0., values[0]):
         return result
-    center = np.median(front, axis=0)
-    values, vectors = np.linalg.eigh(np.cov((front-center).T))
-    normal, edge = vectors[:, 0], vectors[:, 1]
-    span = np.ptp(front @ edge)
-    residual = np.sqrt(max(0., values[0]))
-    if span < parameters['min_front_width_m'] or residual > parameters['max_front_residual_m'] or values[1] < 4*values[0]:
+    normal = vectors[:, 0]
+    if abs(normal[2]) < .1:
         return result
-    if normal[0] < 0:
-        normal = -normal
-    result['heading_yaw'] = float(math.atan2(normal[1], normal[0]))
+    uphill = -normal[:2] / normal[2]
+    length = np.linalg.norm(uphill)
+    if length < 1e-6 or uphill[0] <= 0:
+        return result
+    uphill /= length
+    across = np.array([-uphill[1], uphill[0]])
+    if np.ptp(p[:, :2] @ across) < parameters['min_stair_width_m']:
+        return result
+    result.update(direction='up', heading_yaw=float(math.atan2(uphill[1], uphill[0])))
     return result
+
+
+def nearest_stair_flight(points, parameters):
+    """Fit uphill as before, using the nearest run when a landing separates the samples."""
+    fit = stair_heading(points, parameters)
+    if not fit['stairs']:
+        return fit, points
+    heading = fit['heading_yaw']
+    direction = [math.cos(heading), math.sin(heading)] if heading is not None else [1., 0.]
+    along = points[:, :2] @ direction
+    ordered = np.sort(along)
+    gaps = np.flatnonzero(np.diff(ordered) >= parameters['stair_landing_gap_m'])
+    if len(gaps):
+        points = points[along <= ordered[gaps[0]]]
+        fit = stair_heading(points, parameters)
+        fit['stairs'] = True  # A partial foreground fit cannot certify a clear path.
+    heading = fit['heading_yaw']
+    if heading is not None:
+        normal = np.array([math.cos(heading), math.sin(heading)])
+        lateral = np.array([-normal[1], normal[0]])
+        xy = points[:, :2]
+        along = xy @ normal
+        center = np.median(xy @ lateral)*lateral
+        fit['flight_bounds'] = dict(front_xy=(center+along.min()*normal).tolist(),
+                                    end_xy=(center+along.max()*normal).tolist())
+    return fit, points
 
 
 def suppress_stair_points(points, observation, state, source, parameters):
@@ -63,8 +92,26 @@ def suppress_stair_points(points, observation, state, source, parameters):
     if not observation or not observation.get('stairs') or observation.get('direction') != 'up' or rank.get(observation.get('source'), -1) <= rank[source]:
         return mask
     samples = np.asarray(observation.get('points', []), float).reshape(-1, 3)
+    eligible = np.ones(len(points), bool)
+    flight = state.get('stair_flight')
+    if flight is not None:
+        heading = flight['heading_yaw']
+        normal = np.array([math.cos(heading), math.sin(heading)])
+        lateral = np.array([-normal[1], normal[0]])
+        front = np.asarray(flight['front_xy'])
+        margin = min(parameters['semantic_match_radius_m'], parameters['stair_landing_gap_m']/3)
+
+        def in_flight(values):
+            offsets = values[:, :2]-front
+            along = offsets @ normal
+            return ((along >= -margin) & (along <= flight['length_m']+margin)
+                    & (abs(offsets @ lateral) <= parameters['roi_half_width_m']))
+
+        eligible = in_flight(points)
+        samples = samples[in_flight(samples)]
     if not len(samples):
         return mask
     from scipy.spatial import cKDTree
-    distance, _ = cKDTree(samples).query(points, k=1, distance_upper_bound=parameters['semantic_match_radius_m'])
-    return np.isfinite(distance)
+    distance, _ = cKDTree(samples).query(points[eligible], k=1, distance_upper_bound=parameters['semantic_match_radius_m'])
+    mask[eligible] = np.isfinite(distance)
+    return mask

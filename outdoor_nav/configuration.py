@@ -100,7 +100,6 @@ TOPICS = {
     "camera_semantics": "/outdoor/vision/current_grid",
     "camera_road_mask": "/outdoor/vision/road_mask",
     "camera_labels": "/outdoor/vision/semantic_labels",
-    "camera_confidence": "/outdoor/vision/semantic_confidence",
     "camera_segmentation_status": "/semantic/segmentation_status",
     "camera_overlay": "/semantic/debug_overlay",
     "camera_costmap": "/outdoor/vision/filtered_costmap",
@@ -255,7 +254,7 @@ def validate(config, base=None):
         raise ValueError("Unknown topic role")
     for value in bindings.values():
         topic(value)
-    if len({bindings[k] for k in ('camera_rgb', 'camera_road_mask', 'camera_labels', 'camera_confidence', 'camera_overlay')}) != 5:
+    if len({bindings[k] for k in ('camera_rgb', 'camera_road_mask', 'camera_labels', 'camera_overlay')}) != 4:
         raise ValueError('Camera RGB and segmentation outputs must use distinct topics')
     if bindings["camera_obstacles"] != "/outdoor/direct_nav/visual_obstacles":
         raise ValueError("Original depth node requires its guarded outdoor observation endpoint")
@@ -288,7 +287,6 @@ def validate(config, base=None):
         inputs = {v for k,v in bindings.items() if k not in ('cycle_costmap','cycle_ack')}
         if len(internal)!=2 or internal & inputs:
             raise ValueError('Cycle snapshot and acknowledgment topics must be distinct from sensor inputs')
-        configure_cycle_nav2(nav2, bindings, cycle)
         grid = dict(origin=[-cycle['grid_half_width_m']]*2,
                     width=int(math.ceil(2*cycle['grid_half_width_m'])),
                     height=int(math.ceil(2*cycle['grid_half_width_m'])),
@@ -297,7 +295,14 @@ def validate(config, base=None):
     policy.update(derived)
     terrain = validate_terrain(config.get("terrain", {}), policy, segmentation, gait_enabled)
     if cycle["enabled"]:
-        terrain["observation_timeout_s"] = cycle["period_s"]
+        # A decision period is the default lifetime of perception data.
+        # Honor explicitly configured legacy limits as stricter ceilings.
+        age = min(cycle["period_s"], configured.get("sensor_timeout_s", math.inf),
+                  config["terrain"]["observation_timeout_s"]
+                  if terrain["enabled"] and "observation_timeout_s" in config.get("terrain", {})
+                  else math.inf)
+        policy["sensor_timeout_s"] = terrain["observation_timeout_s"] = age
+        configure_cycle_nav2(nav2, bindings, cycle, age)
     if policy["ranger_descent_enabled"]:
         if policy["ranger_descent_mode"] not in ("auto", "staged"):
             raise ValueError("Ranger descent mode must be auto or staged")
@@ -340,12 +345,12 @@ def validate(config, base=None):
 def load_runtime(path):
     return json.loads(Path(path).read_text())
 
-def configure_cycle_nav2(nav2, topics, cycle):
-    """Explicit opt-in replaces live sensor layers with one frozen odom snapshot."""
+def configure_cycle_nav2(nav2, topics, cycle, observation_age):
+    """Plan with a frozen odom grid while the controller keeps its live layers."""
     from .nav2_parameters import parameters
     local = parameters(nav2, 'local_costmap')
     if 'camera_layer' in local['plugins']:
-        local['camera_layer']['max_age_s'] = cycle['period_s']
+        local['camera_layer']['max_age_s'] = observation_age
     block = parameters(nav2, 'global_costmap')
     extras=set(block['plugins'])-{'lidar_layer','camera_layer','inflation_layer'}
     if extras:
@@ -358,4 +363,4 @@ def configure_cycle_nav2(nav2, topics, cycle):
     block['plugins']=['cycle_layer','inflation_layer']
     block['cycle_layer']={'plugin':'outdoor_camera_layer::CameraLayer','enabled':True,
         'grid_topic':topics['cycle_costmap'],'ack_topic':topics['cycle_ack'],
-        'max_age_s':cycle['period_s']}
+        'max_age_s':observation_age}

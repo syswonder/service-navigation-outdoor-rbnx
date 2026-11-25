@@ -14,7 +14,6 @@ class SegmentationNode(Node):
         super().__init__('semantic_segmentation')
         defaults={'rgb_topic':'/camera_gemini330/color/image_raw','mask_topic':'/semantic/road_mask',
                   'labels_topic':'/outdoor/vision/semantic_labels',
-                  'confidence_topic':'/outdoor/vision/semantic_confidence',
                   'status_topic':'/semantic/segmentation_status',
                   'overlay_topic':'/semantic/debug_overlay','config_json':'{}','max_image_age':1.0}
         for k,v in defaults.items(): self.declare_parameter(k,v)
@@ -24,7 +23,6 @@ class SegmentationNode(Node):
         self.model=create_backend(self.config)
         self.pub=self.create_publisher(Image,self.p['mask_topic'],5)
         self.labels=self.create_publisher(Image,self.p['labels_topic'],5)
-        self.confidence=self.create_publisher(Image,self.p['confidence_topic'],5)
         self.debug=self.create_publisher(Image,self.p['overlay_topic'],2)
         self.status=self.create_publisher(String,self.p['status_topic'],5)
         self.sub=self.create_subscription(Image,self.p['rgb_topic'],self.receive,
@@ -37,13 +35,12 @@ class SegmentationNode(Node):
                 raise ValueError('RGB missing header or stale/future timestamp')
             rgb=self.decoder.imgmsg_to_cv2(msg,'bgr8')[:,:,::-1].copy()
             start=time.monotonic()
-            labels,confidence,mask=predict_labels(self.model,rgb,self.config)
+            labels,_confidence,mask=predict_labels(self.model,rgb,self.config)
             elapsed=time.monotonic()-start
             if self.get_clock().now().nanoseconds*1e-9-seconds(msg.header.stamp)>self.p['max_image_age']:
                 raise ValueError('Inference output is stale; discarded')
             self.pub.publish(image_message(mask,msg.header,'mono8'))
             self.labels.publish(image_message(labels,msg.header,'mono16'))
-            self.confidence.publish(image_message(confidence,msg.header,'32FC1'))
             debug = rgb.copy()
             road = mask == 1
             debug[road] = (debug[road].astype(float)*.55 + np.array([0,255,0])*.45).astype(np.uint8)
