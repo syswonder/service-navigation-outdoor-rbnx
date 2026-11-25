@@ -13,6 +13,7 @@ from tf2_ros import TransformException
 from .core.descent import Survey
 from .core.ground_support import ACK_TOPIC, DESCENT_ACTIVE_TOPIC, FRAME
 from .ground_support_node import SupportFeed, latest_base, xy_yaw
+from .terrain_execution import rotation_clear
 
 
 class RangerDescent:
@@ -24,6 +25,10 @@ class RangerDescent:
         self.ack = None
         self.candidate = None
         self.active = False
+        self.observation_wait = None
+        self.observation_task = None
+        self.observation_origin = None
+        self.observation_attempts = 0
         if self.auto:
             self.active_pub = node.create_publisher(Bool, DESCENT_ACTIVE_TOPIC, 1)
         else:
@@ -32,6 +37,48 @@ class RangerDescent:
     def publish_active(self):
         if self.auto:
             self.active_pub.publish(Bool(data=self.active))
+
+    async def observe_unknown(self, task, requests, results):
+        node = self.node
+        if self.observation_task != task:
+            self.observation_task = task
+            self.observation_wait = self.observation_origin = None
+            self.observation_attempts = 0
+        blockers = node.guard.get("blocked_reasons", ())
+        now = time.monotonic()
+        if (now - node.guard_at >= node.config["command_timeout_s"]
+                or set(blockers) != {"ground_unobserved"} or abs(node.velocity[0]) > .01):
+            self.observation_wait = None
+            return False
+        if self.observation_wait is None:
+            self.observation_wait = now
+        if now - self.observation_wait < .75:
+            return False
+        sample = self.feed.fresh()
+        try:
+            xy, _ = self.pose()
+        except (TransformException, ValueError):
+            return False
+        if sample is None or not sample.clear([xy]) or not rotation_clear(node):
+            return False
+        if self.observation_origin is None or math.dist(xy, self.observation_origin) > .25:
+            self.observation_origin, self.observation_attempts = xy, 0
+        if self.observation_attempts >= 2:
+            return False
+        angle = math.radians(35 if self.observation_attempts == 0 else -35)
+        self.observation_attempts += 1
+        self.observation_wait = None
+        node.stopping = True
+        node.command_pub.publish(Twist())
+        if not await node.release_controller(requests, results) or not await node.confirm_stop():
+            raise RuntimeError("Cannot confirm stop for Ranger observation")
+        requests.clear()
+        results.clear()
+        node.tasks.update(task, state="planning", reason="Ranger checking unobserved ground")
+        await self.observe(task, angle)
+        if rotation_clear(node):
+            await self.observe(task, -angle)
+        return True
 
     def downhill_candidate(self, position, points):
         if len(points) < 2:
@@ -157,6 +204,8 @@ class RangerDescent:
             while swept < abs(angle) and time.monotonic() < deadline:
                 if node.interrupted(task):
                     raise InterruptedError("Ranger observation canceled")
+                if self.auto and not rotation_clear(node):
+                    break
                 sample = self.feed.fresh()
                 if sample is None:
                     break

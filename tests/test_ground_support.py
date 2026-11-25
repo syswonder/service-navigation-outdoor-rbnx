@@ -88,6 +88,10 @@ def test_auto_profile_distinguishes_a_ramp_landing_from_a_step_or_unknown():
     profile = support.profile((0., 0.), [(2.7, 0.)], grid.height)
     assert .15 < profile.crest_m < .8
     assert profile.landing[0] > 1.9
+    lidar_only = SupportMask(support.cells, grid.origin, CELL, 1., .24,
+                             depth_cells=np.zeros_like(support.cells))
+    unconfirmed = lidar_only.profile((0., 0.), [(2.7, 0.)], grid.height)
+    assert unconfirmed.crest is not None and unconfirmed.landing is None
 
     grid, support = observed(points[points[:, 0] < 1.5])
     profile = support.profile((0., 0.), [(2.7, 0.)], grid.height)
@@ -110,6 +114,15 @@ def test_auto_grid_new_frame_does_not_refresh_old_forward_ground():
     support = SupportMask(cells, grid.origin, CELL, 3.1, .24)
     assert support.clear([(0., 0.)])
     assert not support.corridor((0., 0.), [(1., 0.)])
+
+
+def test_lidar_refresh_does_not_refresh_depth_evidence():
+    grid, _ = observed(terrain())
+    points = terrain()
+    grid.update((0., 0.), 0., points, 2., max_cell_age=2., depth_count=0, lidar_stamp=1.8)
+    ahead_x, ahead_y = (np.array((.6, 0.)) - grid.origin) // CELL
+    assert grid.observed[int(ahead_y), int(ahead_x)] == 1.8
+    assert np.max(grid.depth_observed) == 1.
 
 
 def test_auto_braking_uses_measured_speed_and_remaining_ground():

@@ -726,8 +726,13 @@ class Executor(Node):
                     recovery_used = recovery
                 if ranger is not None:
                     target = ranger.downhill_candidate(position, current_points)
+                    handled = False
                     if target is not None:
                         await ranger.descend(task_id, target, follow_requests, follow_results)
+                        handled = True
+                    elif current_points:
+                        handled = await ranger.observe_unknown(task_id, follow_requests, follow_results)
+                    if handled:
                         self.raw_command, self.raw_received = Twist(), 0.
                         current_points, follow_result, sent_window = [], None, None
                         budget = ProgressBudget(planner_patience_s=policy.get("planner_patience_s", 0.0),

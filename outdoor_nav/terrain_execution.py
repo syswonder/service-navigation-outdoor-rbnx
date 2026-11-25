@@ -9,6 +9,40 @@ from .terrain_inputs import TerrainInputs
 from .core.gait import chassis_prepared
 
 
+def rotation_clear(n):
+    grid = n.local_map
+    if grid is None or time.monotonic()-n.stats.get('local_map', -math.inf) >= n.config['sensor_timeout_s']:
+        return False
+    try:
+        if grid.header.frame_id != 'odom' or grid.info.resolution <= 0:
+            return False
+        tf = n.tf.lookup_transform('odom', 'base_link', Time())
+        t = tf.transform.translation
+        # Retain the branch's rotation check with a smaller experimental
+        # stair clearance; this is not a measured chassis sweep radius.
+        stairs = bool((self.observation or {}).get('stairs'))
+        r = 0.25 if stairs else n.config['footprint_radius_m']
+        meta = grid.info
+        # Full circumscribed disk must be observed and free of lethal costs.
+        low_x = math.floor((t.x-r-meta.origin.position.x)/meta.resolution)
+        high_x = math.ceil((t.x+r-meta.origin.position.x)/meta.resolution)
+        low_y = math.floor((t.y-r-meta.origin.position.y)/meta.resolution)
+        high_y = math.ceil((t.y+r-meta.origin.position.y)/meta.resolution)
+        if low_x < 0 or low_y < 0 or high_x >= meta.width or high_y >= meta.height:
+            return False
+        for y in range(low_y, high_y+1):
+            for x in range(low_x, high_x+1):
+                dx = meta.origin.position.x+(x+.5)*meta.resolution-t.x
+                dy = meta.origin.position.y+(y+.5)*meta.resolution-t.y
+                if math.hypot(dx, dy) <= r+meta.resolution:
+                    cost = grid.data[y*meta.width+x]
+                    if cost < 0 or cost >= 99:
+                        return False
+        return True
+    except Exception:
+        return False
+
+
 class TerrainExecution:
     def __init__(self, node):
         self.node = node
@@ -86,35 +120,4 @@ class TerrainExecution:
         return out
 
     def rotation_clear(self):
-        n = self.node
-        grid = n.local_map
-        if grid is None or time.monotonic()-n.stats.get('local_map', -math.inf) >= n.config['sensor_timeout_s']:
-            return False
-        try:
-            if grid.header.frame_id != 'odom' or grid.info.resolution <= 0:
-                return False
-            tf = n.tf.lookup_transform('odom', 'base_link', Time())
-            t = tf.transform.translation
-            # Retain the branch's rotation check with a smaller experimental
-            # stair clearance; this is not a measured chassis sweep radius.
-            stairs = bool((self.observation or {}).get('stairs'))
-            r = 0.25 if stairs else n.config['footprint_radius_m']
-            meta = grid.info
-            # Full circumscribed disk must be observed and free of lethal costs.
-            low_x = math.floor((t.x-r-meta.origin.position.x)/meta.resolution)
-            high_x = math.ceil((t.x+r-meta.origin.position.x)/meta.resolution)
-            low_y = math.floor((t.y-r-meta.origin.position.y)/meta.resolution)
-            high_y = math.ceil((t.y+r-meta.origin.position.y)/meta.resolution)
-            if low_x < 0 or low_y < 0 or high_x >= meta.width or high_y >= meta.height:
-                return False
-            for y in range(low_y, high_y+1):
-                for x in range(low_x, high_x+1):
-                    dx = meta.origin.position.x+(x+.5)*meta.resolution-t.x
-                    dy = meta.origin.position.y+(y+.5)*meta.resolution-t.y
-                    if math.hypot(dx, dy) <= r+meta.resolution:
-                        cost = grid.data[y*meta.width+x]
-                        if cost < 0 or cost >= 99:
-                            return False
-            return True
-        except Exception:
-            return False
+        return rotation_clear(self.node)

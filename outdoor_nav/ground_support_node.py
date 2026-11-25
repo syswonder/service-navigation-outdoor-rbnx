@@ -75,14 +75,15 @@ class SupportFeed:
                 or not math.isfinite(info.origin.position.x) or not math.isfinite(info.origin.position.y)):
             self.snapshot = None
             return
-        cells = np.asarray(msg.data).reshape(SIZE, SIZE) == 0
+        values = np.asarray(msg.data).reshape(SIZE, SIZE)
+        cells = (values == 0) | (values == 1)
         stamp = seconds(msg.header.stamp)
         if stamp > self.invalid_before:
             if self.snapshot is not None and stamp <= self.snapshot[0].stamp:
                 return
             sample = SupportMask(cells, (info.origin.position.x, info.origin.position.y),
                                  info.resolution, stamp, self.config["footprint_radius_m"],
-                                 hazards=np.asarray(msg.data).reshape(SIZE, SIZE) == 100)
+                                 hazards=values == 100, depth_cells=values == 0)
             self.snapshot = sample, time.monotonic()
 
     def fresh(self):
@@ -132,6 +133,7 @@ class GroundSupport(Node):
             # Discard the old support without seeding a different location.
             self.grid.height.fill(np.nan)
             self.grid.observed.fill(-np.inf)
+            self.grid.depth_observed.fill(-np.inf)
             self.grid.rough.fill(False)
             self.lidar = None
         self.correction = epoch
@@ -153,6 +155,7 @@ class GroundSupport(Node):
             self.last_depth = -math.inf
             self.grid.height.fill(np.nan)
             self.grid.observed.fill(-np.inf)
+            self.grid.depth_observed.fill(-np.inf)
             self.grid.rough.fill(False)
             self.lidar = None
         timeout = self.p["ranger_depth_timeout_s"]
@@ -171,10 +174,14 @@ class GroundSupport(Node):
             depth, raw = self.points(msg), self.points(lidar)
             if not len(depth) or not len(raw):
                 raise ValueError("Empty depth or raw lidar")
-            supported = self.grid.update(
-                xy, ground, depth if self.auto else np.concatenate((depth, raw)), stamp,
-                self.p["ranger_ground_cell_timeout_s"] if self.auto else 45.,
-            )
+            age = self.p["ranger_ground_cell_timeout_s"] if self.auto else 45.
+            # LiDAR supplies close-range support outside the depth camera's
+            # footprint. Beyond that strip auto mode requires observed depth.
+            if self.auto:
+                raw = raw[np.linalg.norm(raw[:, :2] - xy, axis=1) <= self.grid.radius + .9]
+            supported = self.grid.update(xy, ground, np.concatenate((depth, raw)),
+                                         stamp, age, depth_count=len(depth),
+                                         lidar_stamp=lidar_stamp if self.auto else None)
             hazards = self.grid.hazard
         except (TransformException, ValueError, TypeError, AssertionError):
             supported = np.zeros((SIZE, SIZE), dtype=bool)
@@ -188,8 +195,12 @@ class GroundSupport(Node):
         output.info.width = output.info.height = SIZE
         output.info.origin.position.x, output.info.origin.position.y = map(float, self.grid.origin)
         output.info.origin.orientation.w = 1.
-        output.data = np.where(supported, 0, np.where(hazards, 100, -1) if self.auto else 100
-                               ).astype(np.int8).ravel().tolist()
+        if self.auto:
+            depth_fresh = stamp - self.grid.depth_observed <= self.p["ranger_ground_cell_timeout_s"]
+            values = np.where(supported, np.where(depth_fresh, 0, 1), np.where(hazards, 100, -1))
+        else:
+            values = np.where(supported, 0, 100)
+        output.data = values.astype(np.int8).ravel().tolist()
         heights = np.where(supported, self.grid.height, np.nan).astype("<f4")
         self.height_pub.publish(Image(header=output.header, height=SIZE, width=SIZE,
                                       encoding="32FC1", step=SIZE*4, data=heights.tobytes()))
