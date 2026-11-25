@@ -706,7 +706,13 @@ class Executor(Node):
             started_sim = self.get_clock().now().nanoseconds / 1e9
             controller_used = None
             recovery_used = (getattr(self, "handled_recovery", 0), getattr(self, "handled_epoch", None))
-            while True:
+            ranger = getattr(self, "ranger", None)
+            if ranger is not None and not ranger.auto:
+                completion_pose = await ranger.run(
+                    task_id, goal_point, guidance, tolerance, follow_requests, follow_results
+                )
+                outcome, stop_confirmed = "succeeded", True
+            while ranger is None or ranger.auto:
                 if self.interrupted(task_id):
                     raise InterruptedError("Task canceled or superseded")
                 position = await self.wait_for_ready_pose(task_id)
@@ -718,6 +724,20 @@ class Executor(Node):
                     budget = ProgressBudget(planner_patience_s=policy.get("planner_patience_s", 0.0),
                                             controller_patience_s=policy.get("controller_patience_s", 20.0))
                     recovery_used = recovery
+                if ranger is not None:
+                    handled = False
+                    if current_points and ranger.should_take_over(task_id):
+                        await ranger.search_and_descend(task_id, goal_point, guidance, tolerance,
+                                                        follow_requests, follow_results)
+                        handled = True
+                    elif current_points:
+                        handled = await ranger.observe_unknown(task_id, follow_requests, follow_results)
+                    if handled:
+                        self.raw_command, self.raw_received = Twist(), 0.
+                        current_points, follow_result, sent_window = [], None, None
+                        budget = ProgressBudget(planner_patience_s=policy.get("planner_patience_s", 0.0),
+                                                controller_patience_s=policy.get("controller_patience_s", 20.0))
+                        continue
                 controller_id = self.controller_id()
                 if controller_used is not None and controller_id != controller_used:
                     self.stopping = True

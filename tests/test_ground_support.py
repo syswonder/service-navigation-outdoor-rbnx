@@ -1,0 +1,131 @@
+import math
+
+import numpy as np
+
+from outdoor_nav.core.descent import Survey
+from outdoor_nav.core.ground_support import CELL, SIZE, GroundGrid, SupportMask, braking_speed
+
+
+def terrain(drop=False, hole=False):
+    x, y = np.meshgrid(np.arange(-1., 2., .04), np.arange(-1., 1.1, .04))
+    z = np.minimum(-.16*x, 0.)
+    if drop:
+        z[x >= .70] -= .25
+    keep = (x < .5) | (x > .85) if hole else np.ones_like(x, dtype=bool)
+    return np.column_stack((x[keep], y[keep], z[keep]))
+
+
+def observed(points):
+    grid = GroundGrid(.075, math.tan(math.radians(15)), .24)
+    cells = grid.update((0., 0.), 0., points, 1.)
+    return grid, SupportMask(cells, grid.origin, CELL, 1., .24)
+
+
+def test_confirmed_ramp_can_be_traversed_but_drop_and_hole_cannot():
+    _, flat = observed(terrain())
+    _, drop = observed(terrain(drop=True))
+    _, hole = observed(terrain(hole=True))
+    assert flat.corridor((0., 0.), [(1.2, 0.)])
+    assert not drop.corridor((0., 0.), [(1.2, 0.)])
+    assert not hole.corridor((0., 0.), [(1.2, 0.)])
+    assert not flat.clear([(100., 0.)])
+
+
+def test_measurement_expiry_does_not_clear_an_unobserved_corridor():
+    grid, _ = observed(terrain())
+    cells = grid.update((0., 0.), 0., np.empty((0, 3)), 47.)
+    support = SupportMask(cells, grid.origin, CELL, 47., .24)
+    assert support.clear([(0., 0.)])
+    assert not support.corridor((0., 0.), [(1.2, 0.)])
+
+
+def test_rejects_old_free_path_at_the_actual_braking_horizon():
+    cells = np.zeros((SIZE, SIZE), dtype=bool)
+    mid = SIZE // 2
+    cells[mid-2:mid+3, mid-2:mid+3] = True
+    support = SupportMask(cells, (-(mid+.5)*CELL,)*2, CELL, 1., .24)
+    config = {"ranger_depth_timeout_s": .35, "ranger_brake_mps2": .55}
+    assert support.clear([(0., 0.)])
+    assert not support.permits((0., 0.), 0., .22, 0., .22, config)
+
+
+def test_survey_uses_support_and_skips_failed_target():
+    grid, support = observed(terrain())
+    survey = Survey()
+    choices = survey.staged_candidates(support, grid.height, (0., 0.), (1.5, 0.), 0., 0.)
+    _, target = choices[0]
+    assert target == (1.5, 0.)
+    for _ in range(3):
+        survey.failed(target, CELL)
+    choices = survey.staged_candidates(support, grid.height, (0., 0.), (1.5, 0.), 0., 0.)
+    assert all(point != target for _, point in choices)
+
+def test_survey_prefers_confirmed_lower_progress_over_platform_viewpoint():
+    grid, support = observed(terrain())
+    choices = Survey().staged_candidates(support, grid.height, (0., 0.), (4., 0.), 0., 0.)
+    assert choices
+    assert choices[0][0] == "descent"
+    assert choices[0][1][0] > .55
+
+
+def test_survey_can_continue_on_lower_landing_but_cannot_scout_across_drop():
+    grid, support = observed(terrain(drop=True))
+    survey = Survey()
+    choices = survey.staged_candidates(support, grid.height, (0., 0.), (4., 0.), 0., 0.)
+    assert all(target[0] < .70 for _, target in choices)
+
+    grid, support = observed(terrain())
+    heights = np.where(support.cells, -.68, np.nan)
+    choices = survey.staged_candidates(support, heights, (0., 0.), (4., 0.), 0., -.68)
+    assert choices and choices[0][0] == "descent"
+
+
+def test_auto_profile_distinguishes_a_ramp_landing_from_a_step_or_unknown():
+    x, y = np.meshgrid(np.arange(-1., 3.1, .03), np.arange(-1., 1.1, .03))
+    ramp = -.16 * np.clip(x - .55, 0., .85)
+    points = np.column_stack((x.ravel(), y.ravel(), ramp.ravel()))
+    grid, support = observed(points)
+    profile = support.profile((0., 0.), [(2.7, 0.)], grid.height)
+    assert .15 < profile.crest_m < .8
+    assert profile.landing[0] > 1.9
+    lidar_only = SupportMask(support.cells, grid.origin, CELL, 1., .24,
+                             depth_cells=np.zeros_like(support.cells))
+    unconfirmed = lidar_only.profile((0., 0.), [(2.7, 0.)], grid.height)
+    assert unconfirmed.crest is not None and unconfirmed.landing is None
+
+    grid, support = observed(points[points[:, 0] < 1.5])
+    profile = support.profile((0., 0.), [(2.7, 0.)], grid.height)
+    assert profile.crest is not None and profile.landing is None
+    assert profile.reason == "ground_unobserved"
+
+    points[:, 2] = np.where(points[:, 0] < .8, 0., -.06)
+    grid, support = observed(points)
+    profile = support.profile((0., 0.), [(2.7, 0.)], grid.height)
+    assert profile.reason == "ground_drop_discontinuous"
+    assert profile.landing is None
+    assert profile.supported_m < .8
+
+
+def test_auto_grid_new_frame_does_not_refresh_old_forward_ground():
+    grid, _ = observed(terrain())
+    points = terrain()
+    off_route = points[points[:, 1] > .6]
+    cells = grid.update((0., 0.), 0., off_route, 3.1, max_cell_age=2.)
+    support = SupportMask(cells, grid.origin, CELL, 3.1, .24)
+    assert support.clear([(0., 0.)])
+    assert not support.corridor((0., 0.), [(1., 0.)])
+
+
+def test_lidar_refresh_does_not_refresh_depth_evidence():
+    grid, _ = observed(terrain())
+    points = terrain()
+    grid.update((0., 0.), 0., points, 2., max_cell_age=2., depth_count=0, lidar_stamp=1.8)
+    ahead_x, ahead_y = (np.array((.6, 0.)) - grid.origin) // CELL
+    assert grid.observed[int(ahead_y), int(ahead_x)] == 1.8
+    assert np.max(grid.depth_observed) == 1.
+
+
+def test_auto_braking_uses_measured_speed_and_remaining_ground():
+    assert braking_speed(.8, .4, .4, .5, .55) == .4
+    assert braking_speed(.26, .4, .22, .5, .55) == 0.
+    assert 0. < braking_speed(.26, .18, .4, .5, .55) < .4

@@ -44,6 +44,8 @@ service:
         upstairs_gait_code: null
       policy:
         camera_max_range_m: 4.0
+        ranger_descent_enabled: false
+        ranger_descent_mode: auto
         lidar_enabled: true
         camera_enabled: false
         camera_geometry_enabled: true

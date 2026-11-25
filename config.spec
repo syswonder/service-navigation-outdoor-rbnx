@@ -129,6 +129,35 @@ properties:
     additionalProperties: false
     description: Outdoor task acceptance, observation freshness, original camera calibration/filtering and commissioning confirmations. Nav2 tuning belongs in params_file.
     properties:
+      ranger_descent_enabled:
+        type: boolean
+        default: false
+        description: Require live ground support and enable Ranger descent.
+      ranger_descent_mode:
+        type: string
+        enum: [auto, staged]
+        default: auto
+        description: Follow normally, survey confirmed terrain hazards, descend by supported segments, and resume ordinary tracking. Staged mode owns the whole task.
+      ranger_step_limit_m:
+        type: number
+        default: 0.075
+      ranger_grade_limit_deg:
+        type: number
+        default: 15.0
+      ranger_brake_mps2:
+        type: number
+        default: 0.55
+      ranger_depth_timeout_s:
+        type: number
+        default: 0.35
+      ranger_ground_cell_timeout_s:
+        type: number
+        default: 2.0
+        description: Maximum age of unoccupied ground evidence in auto mode.
+      ranger_actuation_latency_s:
+        type: number
+        default: 0.10
+        description: Extra braking delay for the command path and chassis in auto mode.
       lidar_enabled:
         type: boolean
         default: true

@@ -16,8 +16,6 @@ import message_filters
 from sensor_sanity_checker.images import ImageDecoder
 from semantic_local_grid.geometry import observations, transform
 from semantic_local_grid.ros_utils import matrix_from_tf, cloud_message
-from .core import detect_low_obstacles
-from .geometric_perception import geometric_observation
 from .rtabmap_backend import FrameSlot, fuse_rtabmap
 from sensor_msgs_py import point_cloud2
 
@@ -47,6 +45,8 @@ class DepthObstacles(Node):
                         navigation_pose_topic='',
                         visual_obstacles_enabled=True,
                         geometry_primary=False,
+                        registered_points_topic='',
+                        registered_only=False,
                         depth_backend='legacy',
                         rtabmap_timeout_s=.2,
                         geometry_expected_ground_z=-.18,
@@ -59,6 +59,18 @@ class DepthObstacles(Node):
         if self.p['depth_backend'] == 'rtabmap' and not self.p['geometry_primary']:
             raise ValueError('RTAB-Map requires geometry_primary')
         self.rtab_slot = FrameSlot(self.p['rtabmap_timeout_s'])
+        if self.p['registered_only'] and (not self.p['geometry_primary']
+                or not self.p['registered_points_topic'] or self.p['depth_backend'] != 'legacy'):
+            raise ValueError('Registered-only projection requires a topic and the geometry inputs')
+        self.registered_pub = (self.create_publisher(PointCloud2, self.p['registered_points_topic'], 5)
+                               if self.p['registered_points_topic'] else None)
+        if not self.p['registered_only']:
+            if self.p['geometry_primary']:
+                from .geometric_perception import geometric_observation
+                self.classify_geometry = geometric_observation
+            else:
+                from .core import detect_low_obstacles
+                self.classify_geometry = detect_low_obstacles
         self.tf = Buffer()
         self.listener = TransformListener(self.tf, self)
         self.navigation_pose = None
@@ -66,9 +78,11 @@ class DepthObstacles(Node):
             from semantic_local_grid.navigation_pose import NavigationPose
             self.navigation_pose = NavigationPose(self, self.p['navigation_pose_topic'])
         self.decoder = ImageDecoder()
-        self.cloud_pub = self.create_publisher(PointCloud2, '/direct_nav/visual_obstacles', 5)
-        self.ground_pub = self.create_publisher(PointCloud2, '/direct_nav/observed_ground', 5)
-        self.status_pub = self.create_publisher(String, '/direct_nav/depth_status', 5)
+        if not self.p['registered_only']:
+            self.cloud_pub = self.create_publisher(PointCloud2, '/direct_nav/visual_obstacles', 5)
+            self.ground_pub = self.create_publisher(PointCloud2, '/direct_nav/observed_ground', 5)
+        status_topic = '/outdoor/ranger/projection_status' if self.p['registered_only'] else '/direct_nav/depth_status'
+        self.status_pub = self.create_publisher(String, status_topic, 5)
         if self.p['depth_backend'] == 'rtabmap':
             self.rtab_pub = self.create_publisher(PointCloud2, '/direct_nav/rtabmap/input', 1)
             self.rtab_subs = [self.create_subscription(
@@ -164,7 +178,7 @@ class DepthObstacles(Node):
     def receive(self, mask, depth, info, color_info):
         if self.p['depth_backend'] == 'rtabmap':
             self.rtab_expire()
-            if self.rtab_slot.pending is not None:
+            if self.rtab_slot.pending is not None and self.registered_pub is None:
                 self.rtab_slot.skipped += 1
                 return
         stamp = depth.header.stamp.sec + depth.header.stamp.nanosec * 1e-9
@@ -208,13 +222,24 @@ class DepthObstacles(Node):
                                      depth.header.stamp))
             in_range = (base[:,0] > 0) & (np.linalg.norm(base[:,:2], axis=1) <= self.p['max_range'])
             base, labels = base[in_range], labels[in_range]
+            if self.registered_pub is not None:
+                planning = self.matrix(self.p['planning_frame'], self.p['base_frame'], depth.header.stamp)
+                if not 0 <= self.get_clock().now().nanoseconds*1e-9-stamp <= self.p['max_age']:
+                    raise ValueError('DEPTH_EXPIRED_DURING_PROCESSING')
+                header = Header(stamp=depth.header.stamp, frame_id=self.p['planning_frame'])
+                self.registered_pub.publish(cloud_message(transform(base, planning), header))
+                if self.p['registered_only']:
+                    return
+                if self.p['depth_backend'] == 'rtabmap' and self.rtab_slot.pending is not None:
+                    self.rtab_slot.skipped += 1
+                    return
             if self.p['geometry_primary']:
-                ground, obstacles, result = geometric_observation(
+                ground, obstacles, result = self.classify_geometry(
                     base, expected_ground_z=self.p['geometry_expected_ground_z'],
                     ground_z_tolerance=self.p['geometry_ground_z_tolerance'],
                     min_height=self.p['min_height'], max_ground_angle_deg=self.p['max_ground_angle_deg'])
             else:
-                obstacles, result = detect_low_obstacles(
+                obstacles, result = self.classify_geometry(
                     base, labels, min_height=self.p['min_height'],
                     detect_obstacles=self.p['visual_obstacles_enabled'])
                 ground = np.empty((0, 3))

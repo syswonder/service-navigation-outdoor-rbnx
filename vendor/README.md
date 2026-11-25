@@ -1,6 +1,6 @@
 # Original xiangruicheng vision code
 
-Source files are retained byte-for-byte from the project snapshot
+Source files come from the project snapshot
 outdoor_sources_full_20261106.tar.gz. source_manifest.json records every origin
 and original SHA-256. The current ranger depth_node and rtabmap_backend hashes were checked against this snapshot before integration.
 
@@ -12,8 +12,8 @@ and original SHA-256. The current ranger depth_node and rtabmap_backend hashes w
 - semantic_direct_navigation/costmap.py: original known-ground-only semantic costs.
 - sensor_sanity_checker/images.py: original stride/endian-safe Image decoder.
 
-The service adapters only provide parameters/remaps and insert vision_filter
-after the original detector. They do not modify any vendored detection algorithm.
+The Ranger registered-only mode in depth_node.py adds a capture-stamped point
+cloud before classification. The manifest retains the original source hash.
 No checkpoint weights, original device configuration or runtime data are bundled.
 The original semantic_direct_navigation, semantic_local_grid and sensor_sanity_checker
 package manifests declare Apache-2.0; see LICENSE.apache-2.0. Original source contents

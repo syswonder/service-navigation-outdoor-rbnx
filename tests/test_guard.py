@@ -92,3 +92,82 @@ def test_owner_conflict_can_clear_without_replaying_a_cached_command():
     count[0] = 1
     Watchdog.check_owners(n)
     assert not n.conflict and n.command_at == 0. and n.command.linear.x == 0.
+
+@pytest.mark.parametrize("depth_live", [True, False])
+def test_ranger_blocks_controller_even_when_original_map_is_free(depth_live):
+    import numpy as np
+    from outdoor_nav.core.ground_support import CELL, SIZE, SupportMask
+
+    n = fixture()
+    n.config.update(ranger_descent_enabled=True, ranger_depth_timeout_s=.35,
+                    ranger_brake_mps2=.55)
+    n.command.linear.x = .22
+    n.original_costmap = np.zeros((SIZE, SIZE), dtype=np.int8)
+    n.get_clock = lambda: S(now=lambda: S(nanoseconds=10_000_000_000))
+    n.speed_sample = (.22, 10., 10.)
+    n.support_tf = Mock()
+    support = SupportMask(np.zeros_like(n.original_costmap, dtype=bool), (-8., -8.), CELL, 10., .3)
+    valid = SupportMask(np.ones_like(n.original_costmap, dtype=bool), (-8., -8.), CELL, 10., .3)
+    feeds = [valid]
+    n.support = S(fresh=lambda: feeds[-1])
+    n.ranger_observation = lambda now: Watchdog.ranger_observation(n, now)
+    n.ranger_permits = lambda command, now: Watchdog.ranger_permits(n, command, now)
+    pose = S(transform=S(translation=S(x=0., y=0.), rotation=S(x=0., y=0., z=0., w=1.)))
+    with patch("outdoor_nav.guard.time.monotonic", return_value=10.), patch(
+        "outdoor_nav.ground_support_node.latest_base", return_value=pose
+    ):
+        Watchdog.tick(n)
+        assert n.pub.publish.call_args.args[0].linear.x == pytest.approx(.22)
+        feeds.append(support if depth_live else None)
+        for _ in range(10):
+            Watchdog.tick(n)
+            sent = n.pub.publish.call_args.args[0]
+            assert sent.linear.x == 0. and sent.angular.z == 0.
+            speed = max(sent.linear.x, n.speed_sample[0] - .55*.05)
+            n.speed_sample = (speed, 10., 10.)
+    sent = n.pub.publish.call_args.args[0]
+    assert n.speed_sample[0] == 0.
+    assert n.original_costmap[SIZE//2, SIZE//2] == 0
+    assert sent.linear.x == 0 and sent.angular.z == 0
+    assert n.command.linear.x == .22
+
+
+def test_auto_ranger_tracks_flat_limits_a_crest_and_stops_on_depth_loss():
+    import numpy as np
+    from outdoor_nav.core.ground_support import CELL, SIZE, SupportMask
+
+    n = fixture()
+    n.ranger_auto = True
+    n.descent_at = -math.inf
+    n.ranger_yaw_rate = 0.
+    n.config.update(ranger_descent_enabled=True, ranger_depth_timeout_s=.35,
+                    ranger_brake_mps2=.55, ranger_actuation_latency_s=.10, footprint_radius_m=.24)
+    axes = (np.arange(SIZE) - SIZE // 2) * CELL
+    support = SupportMask(np.ones((SIZE, SIZE), dtype=bool),
+                          (axes[0] - CELL/2.,) * 2, CELL, 10., .24)
+    heights = np.zeros((SIZE, SIZE))
+    n.support = S(elevation=lambda sample: heights)
+    n.command.linear.x = .4
+    n.ranger_observation = lambda now, feed=None: (support, (0., 0.), 0., .4)
+    n.ranger_limit = lambda command, now: Watchdog.ranger_limit(n, command, now)
+    with patch("outdoor_nav.guard.time.monotonic", return_value=10.):
+        Watchdog.tick(n)
+        assert n.pub.publish.call_args.args[0].linear.x == pytest.approx(.4)
+        heights[:] = -.16 * np.maximum(0., axes - .32)
+        Watchdog.tick(n)
+        assert n.pub.publish.call_args.args[0].linear.x == 0.
+        n.descent_at = 10.
+        n.ranger_observation = lambda now, feed=None: (support, (0., 0.), 0., .2)
+        Watchdog.tick(n)
+        assert n.pub.publish.call_args.args[0].linear.x == 0.
+        n.survey_at = 10.
+        n.survey_support = n.support
+        Watchdog.tick(n)
+        assert n.pub.publish.call_args.args[0].linear.x == pytest.approx(.22)
+        n.descent_at = -math.inf
+        Watchdog.tick(n)
+        assert n.pub.publish.call_args.args[0].linear.x == 0.
+        n.ranger_observation = lambda now, feed=None: None
+        n.survey_at = -math.inf
+        Watchdog.tick(n)
+        assert n.pub.publish.call_args.args[0].linear.x == 0.

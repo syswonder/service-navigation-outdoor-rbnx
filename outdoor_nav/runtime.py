@@ -101,7 +101,7 @@ class OutdoorExecutor(Executor):
             for n in ("planner_server", "controller_server")
         }
         self.command_pub = self.create_publisher(Twist, "/outdoor/safe_command", 10)
-        if self.config["camera_enabled"]:
+        if self.config["camera_enabled"] or self.config.get("ranger_descent_enabled", False):
             self.publish_camera_mount()
         self.cycle = None
         self.terrain = None
@@ -126,6 +126,10 @@ class OutdoorExecutor(Executor):
         if self.runtime.get("decision_cycle", {}).get("enabled"):
             from .cycle_runtime import CycleNavigation
             self.cycle = CycleNavigation(self)
+        self.ranger = None
+        if self.config.get("ranger_descent_enabled", False):
+            from .descent_execution import RangerDescent
+            self.ranger = RangerDescent(self)
         self.path_pub = self.create_publisher(
             NavPath, "/navigation/execution_path", LATCHED
         )
@@ -315,12 +319,22 @@ class OutdoorExecutor(Executor):
                 self.command_pub.publish(Twist())
 
     def safety_tick(self):
+        ranger = getattr(self, "ranger", None)
+        if ranger is not None:
+            ranger.publish_active()
         if correction_pending(self.geo, getattr(self, "handled_recovery", 0),
                               getattr(self, "handled_epoch", None)):
             self.command_pub.publish(Twist())
             return
         if getattr(self, "cycle", None) is not None and not self.cycle.allowed():
             self.command_pub.publish(Twist())
+            return
+        if ranger is not None and ranger.turn:
+            task = self.tasks.snapshot(self.owner, include_paths=False) if self.owner else None
+            command = Twist()
+            if task and not task["cancel_requested"] and self.status(False)["ready"]:
+                command.angular.z = ranger.turn
+            self.command_pub.publish(command)
             return
         if getattr(self, "terrain", None) is None:
             return super().safety_tick()
@@ -415,6 +429,13 @@ class OutdoorExecutor(Executor):
         self._state(msg, "geo")
         if self.cycle is not None:
             self.cycle.sample(self.geo)
+        if getattr(self, "ranger", None) is not None and correction_pending(self.geo, getattr(self, "handled_recovery", 0),
+                                                          getattr(self, "handled_epoch", None)):
+            self.ranger.invalidate_support()
+            self.ranger.turn = 0.
+            self.ranger.active = False
+            self.ranger.takeover_wait = None
+            self.ranger.publish_active()
         if self.owner and correction_pending(self.geo, getattr(self, "handled_recovery", 0),
                                              getattr(self, "handled_epoch", None)):
             self.stopping = True
@@ -643,22 +664,30 @@ class OutdoorExecutor(Executor):
         if tolerance is None:
             raise RuntimeError("Task has no GNSS acceptance policy")
         configured = self.config["controller_goal_tolerance_m"]
-        effective = min(tolerance, configured)
+        ranger = getattr(self, "ranger", None)
+        effective = min(tolerance, configured, .17) if ranger is not None and not ranger.auto else min(tolerance, configured)
         if effective < configured or getattr(self, "controller_tolerance_overridden", False):
-            if not self.controller_parameters.service_is_ready():
-                raise RuntimeError("Controller parameter service is unavailable")
-            req = SetParametersAtomically.Request()
-            req.parameters = [
-                Parameter("goal_checker.xy_goal_tolerance", value=float(effective)).to_parameter_msg()
-            ]
-            # Keep restoration pending even when the request succeeds after our deadline.
             self.controller_tolerance_overridden = True
-            result = await self.result(self.controller_parameters.call_async(req), task_id)
-            if not result.result.successful:
-                raise RuntimeError("Controller rejected the task arrival tolerance")
+            await self.set_goal_tolerance(task_id, "goal_checker", effective)
             self.controller_tolerance_overridden = effective < configured
         if getattr(self, "terrain", None) is not None:
             self.terrain.prepared_task = task_id
+
+    async def prepare_ranger_segment(self, task_id):
+        tolerance = self.tasks.snapshot(task_id)["arrival_tolerance_m"]
+        effective = min(tolerance, self.config["controller_goal_tolerance_m"], .17)
+        await self.set_goal_tolerance(task_id, "ranger_goal_checker", effective)
+
+    async def set_goal_tolerance(self, task_id, checker, tolerance):
+        if not self.controller_parameters.service_is_ready():
+            raise RuntimeError("Controller parameter service is unavailable")
+        request = SetParametersAtomically.Request()
+        request.parameters = [
+            Parameter(f"{checker}.xy_goal_tolerance", value=float(tolerance)).to_parameter_msg()
+        ]
+        result = await self.result(self.controller_parameters.call_async(request), task_id)
+        if not result.result.successful:
+            raise RuntimeError(f"Controller rejected the arrival tolerance for {checker}")
 
     async def guided_path(self, guidance, window, position, task_id):
         if self.controller_id() != "StairsFollowPath":

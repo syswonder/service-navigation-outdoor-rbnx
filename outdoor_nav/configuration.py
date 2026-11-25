@@ -11,6 +11,14 @@ from .ground_reference import load_ground_reference
 
 DEFAULTS = {
     "lidar_enabled": True,
+    "ranger_descent_enabled": False,
+    "ranger_descent_mode": "auto",
+    "ranger_step_limit_m": 0.075,
+    "ranger_grade_limit_deg": 15.0,
+    "ranger_brake_mps2": 0.55,
+    "ranger_depth_timeout_s": 0.35,
+    "ranger_ground_cell_timeout_s": 2.0,
+    "ranger_actuation_latency_s": 0.10,
     "camera_enabled": False,
     "camera_geometry_enabled": True,
     "camera_geometry_backend": "legacy",
@@ -295,6 +303,21 @@ def validate(config, base=None):
                   else math.inf)
         policy["sensor_timeout_s"] = terrain["observation_timeout_s"] = age
         configure_cycle_nav2(nav2, bindings, cycle, age)
+    if policy["ranger_descent_enabled"]:
+        if policy["ranger_descent_mode"] not in ("auto", "staged"):
+            raise ValueError("Ranger descent mode must be auto or staged")
+        if (not policy["lidar_enabled"] or not policy["camera_frame_confirmed"]
+                or not policy["footprint_confirmed"] or not policy["cloud_frame_confirmed"]):
+            raise ValueError("Ranger descent requires verified camera, lidar and footprint")
+        if cycle["enabled"] or terrain["enabled"] or gait_enabled:
+            raise ValueError("Ranger descent uses the continuous flat controller")
+        if not (0 < policy["ranger_step_limit_m"] <= .15
+                and 0 < policy["ranger_grade_limit_deg"] <= 30
+                and 0 < policy["ranger_brake_mps2"] <= 1
+                and 0 < policy["ranger_depth_timeout_s"] <= policy["sensor_timeout_s"]
+                and policy["ranger_depth_timeout_s"] <= policy["ranger_ground_cell_timeout_s"] <= 5.
+                and 0 < policy["ranger_actuation_latency_s"] <= 1.):
+            raise ValueError("Invalid Ranger descent limits")
     if terrain["enabled"] and terrain["can_climb_stairs"]:
         from .nav2_parameters import parameters
         stairs = parameters(nav2, "controller_server").get("StairsFollowPath", {})
