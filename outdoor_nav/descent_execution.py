@@ -27,6 +27,7 @@ class RangerDescent:
         self.turn = 0.
         self.ack = None
         self.takeover_wait = None
+        self.last_handoff = None
         self.active = False
         self.searching = False
         self.observation_wait = None
@@ -105,6 +106,12 @@ class RangerDescent:
         if (now - node.guard_at >= node.config["command_timeout_s"]
                 or (not blockers and ahead not in eligible) or not blockers <= eligible
                 or self.feed.fresh() is None):
+            self.takeover_wait = None
+            return False
+        handoff = self.last_handoff
+        # Let the new controller align on the confirmed landing. A guard stop
+        # still takes priority over this short settling period.
+        if not blockers and handoff is not None and handoff[0] == task and now - handoff[1] < 3.:
             self.takeover_wait = None
             return False
         if self.takeover_wait is None or self.takeover_wait[0] != task:
@@ -425,6 +432,7 @@ class RangerDescent:
                 sample, heights, xy, level = await self.wait_support(task, support_timeout, need_heights=True)
                 if (self.landing_ready(sample, heights, xy, level, platform_z, descent_heading)
                         and await self.verify_landing(task, sample.stamp, platform_z, descent_heading)):
+                    self.last_handoff = task, time.monotonic()
                     self.report("landing_confirmed_returning_to_nav2", xy)
                     return position
             node.tasks.update(task, state="planning", reason="Ranger observing confirmed ground")

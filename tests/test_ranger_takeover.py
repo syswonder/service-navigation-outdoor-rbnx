@@ -15,7 +15,7 @@ def test_known_hazard_starts_a_fresh_bounded_survey(monkeypatch):
     now = [1.]
     node = S(guard_at=1., guard={"blocked_reasons": ["ground_hazard"]},
              config={"command_timeout_s": .5})
-    ranger = S(node=node, feed=S(fresh=lambda: True), takeover_wait=None)
+    ranger = S(node=node, feed=S(fresh=lambda: True), takeover_wait=None, last_handoff=None)
     monkeypatch.setattr("outdoor_nav.descent_execution.time.monotonic", lambda: now[0])
     assert not RangerDescent.should_take_over(ranger, "task")
     now[0] += .36
@@ -31,6 +31,26 @@ def test_known_hazard_starts_a_fresh_bounded_survey(monkeypatch):
     assert not RangerDescent.should_take_over(ranger, "new task")
     now[0] += .36
     assert RangerDescent.should_take_over(ranger, "new task")
+
+
+def test_landing_settles_early_warning_but_keeps_real_guard_stops(monkeypatch):
+    now = [1.]
+    node = S(guard_at=1., guard={"ranger_terrain_ahead": "ground_hazard"},
+             config={"command_timeout_s": .5})
+    ranger = S(node=node, feed=S(fresh=lambda: True), takeover_wait=None, last_handoff=("task", 0.))
+    monkeypatch.setattr("outdoor_nav.descent_execution.time.monotonic", lambda: now[0])
+    assert not RangerDescent.should_take_over(ranger, "task")
+    assert ranger.takeover_wait is None
+    node.guard["blocked_reasons"] = ["ground_hazard"]
+    assert not RangerDescent.should_take_over(ranger, "task")
+    now[0] += .36
+    assert RangerDescent.should_take_over(ranger, "task")
+    node.guard = {"ranger_terrain_ahead": "ground_hazard"}
+    now[0] = node.guard_at = 3.1
+    ranger.takeover_wait = None
+    assert not RangerDescent.should_take_over(ranger, "task")
+    now[0] += .36
+    assert RangerDescent.should_take_over(ranger, "task")
 
 
 def test_landing_requires_flat_support_under_and_ahead_of_the_vehicle():
