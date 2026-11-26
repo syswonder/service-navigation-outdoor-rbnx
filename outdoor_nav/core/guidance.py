@@ -141,6 +141,25 @@ def gait_boundary_points(reference, intervals):
     return points
 
 
+def arrived_at_checkpoint(position, previous, checkpoint, tolerance):
+    """The boundary counts as reached when the robot is on it or already past it.
+
+    A gait boundary is a line across the route, not a spot: once the robot has
+    crossed it (within half a metre laterally) it must be able to advance even
+    if the exact station point was never touched. Otherwise a replan that
+    restarts the schedule behind the robot re-requests the previous gait while
+    the chassis already switched, and confirmation never matches.
+    """
+    if distance(position, checkpoint) <= tolerance:
+        return True
+    dx, dy = checkpoint["x"] - previous["x"], checkpoint["y"] - previous["y"]
+    length = math.hypot(dx, dy)
+    if not length:
+        return False
+    px, py = position["x"] - checkpoint["x"], position["y"] - checkpoint["y"]
+    return px * dx + py * dy >= 0 and abs(px * dy - py * dx) / length <= 0.5
+
+
 def leg_goal_tolerance(ends_at_checkpoint, configured, boundary_tolerance):
     """A leg that stops at a gait boundary must be driven, not declared reached.
 
@@ -274,7 +293,10 @@ class RouteGuidance:
                 self.index += 1
                 continue
             if self.index in self.checkpoints:
-                if distance(position, self.points[self.index]) > self.checkpoint_tolerance:
+                if not arrived_at_checkpoint(
+                    position, self.target(self.index - 1), self.points[self.index],
+                    self.checkpoint_tolerance,
+                ):
                     break
                 self.index += 1
                 continue

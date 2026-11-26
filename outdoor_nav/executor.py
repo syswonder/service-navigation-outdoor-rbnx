@@ -633,10 +633,19 @@ class Executor(Node):
             if usable and index < len(guidance.points) - 1:
                 end = leg[-1].pose.position
                 leg_tolerance = self.config.get("controller_goal_tolerance_m", .5)
+                inside_tolerance = leg_tolerance
                 if index in guidance.checkpoints:
-                    leg_tolerance = min(leg_tolerance, guidance.checkpoint_tolerance/2)
-                    usable = math.hypot(end.x-reference["x"], end.y-reference["y"]) <= guidance.checkpoint_tolerance/2
-                inside_goal = math.hypot(end.x-position["x"], end.y-position["y"]) <= leg_tolerance
+                    # Accept the planner's own goal tolerance: demanding half the
+                    # boundary tolerance rejected normal NavFn shortcuts and
+                    # stopped the robot right in front of the stairs.
+                    allowance = max(guidance.checkpoint_tolerance / 2,
+                                    self.config.get("planner_tolerance_m", .2) + .05)
+                    leg_tolerance = min(leg_tolerance, allowance)
+                    # Only a path that barely leaves the robot is "no path";
+                    # the leg legitimately starts close to the boundary.
+                    inside_tolerance = .05
+                    usable = math.hypot(end.x-reference["x"], end.y-reference["y"]) <= allowance
+                inside_goal = math.hypot(end.x-position["x"], end.y-position["y"]) <= inside_tolerance
                 forward = ((end.x-start["x"])*(reference["x"]-previous["x"])
                            + (end.y-start["y"])*(reference["y"]-previous["y"]))
                 usable = usable and not inside_goal and (index in guidance.bends or forward > 0)

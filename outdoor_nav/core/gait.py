@@ -3,7 +3,8 @@
 from copy import deepcopy
 import math
 
-from .guidance import distance, projection, entered_next_segment, gait_boundary_points, insert_checkpoints
+from .guidance import (arrived_at_checkpoint, distance, projection, entered_next_segment,
+                        gait_boundary_points, insert_checkpoints)
 
 FLAT = 0x3002
 STAIRS = 0x3003
@@ -73,7 +74,9 @@ class RouteStation:
             a, b, c = self.points[self.index:self.index + 3]
             boundary = self.index + 1
             if boundary in self.checkpoints and boundary not in self.passed:
-                if distance(point, b) > self.checkpoint_tolerance:
+                if not arrived_at_checkpoint(
+                    point, a, b, self.checkpoint_tolerance
+                ):
                     break
                 self.passed.add(boundary)
                 self.index += 1
@@ -132,7 +135,11 @@ class GaitSchedule:
     def tick(self, position, now, actual, feedback_age_s, eligible, stopped=False, timeout_s=5., prepare_timeout_s=15., rotating=False):
         station = self.route.update(position)
         desired = self.desired(station)
-        if rotating and desired == STAIRS:
+        # Only a robot that has actually stopped may trade the stairs gait for
+        # the flat one to turn in place. A moving climb emits small rotation
+        # corrections all the time; treating those as in-place turns flipped the
+        # gait every few seconds and the robot never got up a step.
+        if rotating and desired == STAIRS and stopped:
             if not self.rotation_hold:
                 self.rotation_hold = True
             self.rotation_since = now
