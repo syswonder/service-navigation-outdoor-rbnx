@@ -601,6 +601,10 @@ class OutdoorExecutor(Executor):
             "measured_velocity": list(self.velocity)
             if all(math.isfinite(v) for v in self.velocity)
             else None,
+            # Signed body twist for displays; the magnitudes above drive the stop checks.
+            "measured_twist": list(self.odom_twist)
+            if all(math.isfinite(v) for v in self.odom_twist)
+            else None,
             "velocity_fresh": now - self.velocity_at < c.get("localization_timeout_s", 3.0),
             "task": self.tasks.snapshot() if include_task else None,
         }
