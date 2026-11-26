@@ -141,6 +141,18 @@ def gait_boundary_points(reference, intervals):
     return points
 
 
+def leg_goal_tolerance(ends_at_checkpoint, configured, boundary_tolerance):
+    """A leg that stops at a gait boundary must be driven, not declared reached.
+
+    The controller's goal checker keeps its own tolerance (0.5 m on this
+    deployment); a checkpoint closer than that would report "reached" while the
+    robot is still short of the boundary and the window would never advance.
+    """
+    if ends_at_checkpoint:
+        return min(configured, boundary_tolerance * 0.5)
+    return configured
+
+
 def insert_checkpoints(reference, checkpoints):
     """Keep checkpoint order while inserting stations that are between survey points."""
     if len(reference) < 2:

@@ -79,3 +79,12 @@ def test_journal_from_another_version_still_loads(tmp_path):
     saved = store.snapshot('a' * 32)
     assert saved['state'] == 'failed'
     assert 'terrain_status' not in saved
+
+
+def test_checkpoint_leg_gets_a_tighter_goal_tolerance():
+    from outdoor_nav.core.guidance import leg_goal_tolerance
+    # The window ends at a gait boundary: the controller must still drive there.
+    assert leg_goal_tolerance(True, .5, .25) == .125
+    assert leg_goal_tolerance(True, .1, .25) == .1
+    # Ordinary legs keep the configured task tolerance.
+    assert leg_goal_tolerance(False, .5, .25) == .5

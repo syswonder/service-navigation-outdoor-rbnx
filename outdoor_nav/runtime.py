@@ -550,6 +550,8 @@ class OutdoorExecutor(Executor):
             raise RuntimeError("Task has no GNSS acceptance policy")
         configured = self.config["controller_goal_tolerance_m"]
         effective = min(tolerance, configured)
+        self.effective_goal_tolerance = effective
+        self.leg_goal_tolerance_used = None
         if effective < configured or getattr(self, "controller_tolerance_overridden", False):
             if not self.controller_parameters.service_is_ready():
                 raise RuntimeError("Controller parameter service is unavailable")

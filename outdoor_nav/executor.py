@@ -26,7 +26,8 @@ from tf2_ros import Buffer, TransformListener
 from unique_identifier_msgs.msg import UUID
 
 from .http import ApiError, serve
-from .core.guidance import RouteGuidance, validate_point, free_via_point, observed_obstacle
+from .core.guidance import (RouteGuidance, validate_point, free_via_point, observed_obstacle,
+                            leg_goal_tolerance)
 from .core.tasks import TaskStore, TERMINAL, ProgressBudget
 from .core.scan_health import healthy_scan
 from rclpy.parameter import Parameter
@@ -528,6 +529,21 @@ class Executor(Node):
                 return False
         return True
 
+    async def use_goal_tolerance(self, tolerance, task_id):
+        """Apply the tolerance this leg needs; the follower reads it per goal."""
+        if getattr(self, "leg_goal_tolerance_used", None) == tolerance:
+            return
+        if not self.controller_parameters.service_is_ready():
+            raise RuntimeError("Controller parameter service is unavailable")
+        request = SetParametersAtomically.Request()
+        request.parameters = [
+            Parameter("goal_checker.xy_goal_tolerance", value=float(tolerance)).to_parameter_msg()
+        ]
+        result = await self.result(self.controller_parameters.call_async(request), task_id)
+        if not result.result.successful:
+            raise RuntimeError("Controller rejected the leg goal tolerance")
+        self.leg_goal_tolerance_used = tolerance
+
     async def guided_path(self, guidance, window, position, task_id):
         # Straight-road samples track progress, but forcing a path through each
         # of them pulls the robot back to the reference line between obstacles.
@@ -732,6 +748,11 @@ class Executor(Node):
                 now = self.get_clock().now().nanoseconds / 1e9
                 budget.moved(position["x"], position["y"], now)
                 window = guidance.window(position)
+                leg_tolerance = leg_goal_tolerance(
+                    bool(window) and window[-1] in guidance.checkpoints,
+                    getattr(self, "effective_goal_tolerance", self.config["controller_goal_tolerance_m"]),
+                    self.config.get("gait_boundary_tolerance_m", .25),
+                )
                 guidance_changed = window != sent_window
                 remaining = math.dist(
                     (position["x"], position["y"]), (goal_point["x"], goal_point["y"])
@@ -860,6 +881,7 @@ class Executor(Node):
                     self.tasks.update(
                         task_id, state="replanning" if current_points else "planning"
                     )
+                    await self.use_goal_tolerance(leg_tolerance, task_id)
                     command = FollowPath.Goal()
                     command.path = path
                     command.controller_id = controller_id
