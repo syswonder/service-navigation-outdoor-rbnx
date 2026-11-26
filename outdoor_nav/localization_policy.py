@@ -23,3 +23,9 @@ def continuation_allowed(status, owned, allow_float=True):
 
 def arrival_confirmed(status):
     return status.get("ready") and status.get("grade") in ("fixed", "float")
+
+
+def correction_pending(status, recovery, epoch):
+    current = (status.get('navigation_sample') or {}).get('epoch')
+    return ((status.get('fusion') or {}).get('recovery_id', 0) != recovery
+            or (epoch is not None and current is not None and epoch != current))

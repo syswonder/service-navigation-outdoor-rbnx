@@ -25,7 +25,12 @@ properties:
     description: Absolute ROS topics; explicit values override Atlas. Roles cloud, scan, odom, localization, chassis, tf, tf_static. localization is resolved from the selected localization service unless explicitly bound.
   policy:
     type: object
-    description: See outdoor_nav/configuration.py DEFAULTS; same field execution thresholds, confirmed calibration/feedback and motion gates. No raw sensor configuration.
+    description: See outdoor_nav/configuration.py DEFAULTS; confirmed calibration/feedback and motion gates. No raw sensor configuration.
+    properties:
+      gait_boundary_tolerance_m:
+        type: number
+        default: 0.25
+        description: Required proximity to recorded gait-change stations before advancing the route; does not change final arrival tolerance.
   velocity_output_topic:
     type: string
     default: /robonix/nomotion/outdoor_cmd_vel

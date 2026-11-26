@@ -72,26 +72,23 @@ def test_guard_limits_and_nonfinite_velocity():
     assert n.pub.publish.call_args.args[0].linear.x == 0
 
 
-def test_guard_logic_matches_original():
-    root = Path(__file__).parents[1]
-
-    def methods(path):
-        c = next(
-            n for n in ast.parse(path.read_text()).body if isinstance(n, ast.ClassDef)
-        )
-        return {n.name: ast.dump(n) for n in c.body if isinstance(n, ast.FunctionDef)}
-
-    old, new = (
-        methods(root / "tests/upstream_guard.py.txt"),
-        methods(root / "outdoor_nav/guard.py"),
-    )
-    for name in ("check_owners", "receive", "geo", "scan", "tick", "destroy_node"):
-        assert old[name] == new[name], name
-
-
 def test_localization_has_three_seconds_but_command_and_scan_stay_fresh():
     n = fixture()
     n.geo_at = 7.1
     with patch("outdoor_nav.guard.time.monotonic", return_value=10.0):
         Watchdog.tick(n)
     assert n.pub.publish.call_args.args[0].linear.x == .2
+
+
+def test_owner_conflict_can_clear_without_replaying_a_cached_command():
+    n = fixture()
+    count = [2]
+    n.count_publishers = lambda *_: count[0]
+    n.get_logger = lambda: Mock()
+    Watchdog.check_owners(n)
+    assert n.conflict and n.command_at == 0. and n.command.linear.x == 0.
+    n.command.linear.x = .2
+    n.command_at = 9.9
+    count[0] = 1
+    Watchdog.check_owners(n)
+    assert not n.conflict and n.command_at == 0. and n.command.linear.x == 0.

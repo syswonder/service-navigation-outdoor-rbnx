@@ -6,7 +6,7 @@ import time
 import signal
 from rclpy.signals import SignalHandlerOptions
 from .configuration import load_runtime
-from .core.scan_health import healthy_scan
+from .core.scan_health import acquisition_monotonic, healthy_scan
 
 import rclpy
 from geometry_msgs.msg import Twist
@@ -44,11 +44,14 @@ class Watchdog(Node):
         self.create_timer(1.0, self.check_owners)
 
     def check_owners(self):
-        if self.count_publishers(self.pub.topic_name) > 1:
-            self.conflict = True
-            self.get_logger().error(
-                "Another command output publisher detected; restart after removing it"
-            )
+        conflict = self.count_publishers(self.pub.topic_name) > 1
+        if conflict != self.conflict:
+            # Removing a competing publisher restores readiness, not an old
+            # command: the active task must have survived and send fresh output.
+            self.command, self.command_at = Twist(), 0.0
+            if conflict:
+                self.get_logger().error("Another command output publisher detected; stopping")
+        self.conflict = conflict
 
     def receive(self, msg):
         self.command, self.command_at = msg, time.monotonic()
@@ -70,7 +73,7 @@ class Watchdog(Node):
     def scan(self, msg):
         now_s = self.get_clock().now().nanoseconds / 1e9
         if healthy_scan(msg, now_s, self.config["sensor_timeout_s"]):
-            self.scan_at = time.monotonic()
+            self.scan_at = max(self.scan_at, acquisition_monotonic(msg, now_s, time.monotonic()))
 
     def tick(self):
         now = time.monotonic()

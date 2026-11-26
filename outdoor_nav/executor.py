@@ -556,7 +556,7 @@ class Executor(Node):
         for offset, index in enumerate(window):
             reference = guidance.points[index]
             point = reference
-            if index != len(guidance.points) - 1:
+            if index != len(guidance.points) - 1 and index not in guidance.checkpoints:
                 point = free_via_point(point, self.global_map)
             request = ComputePathToPose.Goal()
             request.goal.header = path.header
@@ -585,7 +585,21 @@ class Executor(Node):
             if self.hardware and guidance.final_leg and len(leg) == 1:
                 # A coincident destination still needs a path for final heading alignment.
                 leg = [request.start, *leg]
-            if result.status != GoalStatus.STATUS_SUCCEEDED or len(leg) < 2:
+            usable = result.status == GoalStatus.STATUS_SUCCEEDED and len(leg) >= 2
+            if usable and index < len(guidance.points) - 1:
+                end = leg[-1].pose.position
+                leg_tolerance = self.config.get("controller_goal_tolerance_m", .5)
+                if index in guidance.checkpoints:
+                    leg_tolerance = min(leg_tolerance, guidance.checkpoint_tolerance/2)
+                    usable = math.hypot(end.x-reference["x"], end.y-reference["y"]) <= guidance.checkpoint_tolerance/2
+                inside_goal = math.hypot(end.x-position["x"], end.y-position["y"]) <= leg_tolerance
+                forward = ((end.x-start["x"])*(reference["x"]-previous["x"])
+                           + (end.y-start["y"])*(reference["y"]-previous["y"]))
+                usable = usable and not inside_goal and (index in guidance.bends or forward > 0)
+            if not usable and index in guidance.checkpoints:
+                self.planner_failure = f"Required gait boundary {index} has no path; refusing to skip it"
+                return None
+            if not usable:
                 now_s = self.get_clock().now().nanoseconds / 1e9
                 if (index < len(guidance.points)-1
                         and self.scan is not None
@@ -615,6 +629,10 @@ class Executor(Node):
                         continue
                 # An unreachable later station does not invalidate the part
                 # already planned. Follow it and retry from a closer position.
+                self.planner_failure = (
+                    f"No advancing path at via {index} ({point['x']:.2f}, {point['y']:.2f}); "
+                    f"planner status {result.status}, {len(leg)} poses"
+                )
                 if not path.poses:
                     return None
                 break
@@ -677,7 +695,10 @@ class Executor(Node):
             tolerance = state.get("arrival_tolerance_m") or self.arrival_tolerance
             goal_point = state["goal"]
             position = await self.wait_for_ready_pose(task_id)
-            guidance = RouteGuidance(route["reference_path"], position, goal_point)
+            from .core.guidance import gait_boundary_points
+            guidance = RouteGuidance(route["reference_path"], position, goal_point,
+                checkpoints=gait_boundary_points(route["reference_path"], state.get("intervals", [])),
+                checkpoint_tolerance=self.config.get("gait_boundary_tolerance_m", .25))
             self.tasks.update(task_id, reference_path=route["reference_path"])
             current_points, follow_result = [], None
             sent_window = None
@@ -689,15 +710,15 @@ class Executor(Node):
             )
             started_sim = self.get_clock().now().nanoseconds / 1e9
             controller_used = None
-            recovery_used = getattr(self, "handled_recovery", 0)
+            recovery_used = (getattr(self, "handled_recovery", 0), getattr(self, "handled_epoch", None))
             while True:
                 if self.interrupted(task_id):
                     raise InterruptedError("Task canceled or superseded")
                 position = await self.wait_for_ready_pose(task_id)
-                recovery = getattr(self, "handled_recovery", 0)
+                recovery = (getattr(self, "handled_recovery", 0), getattr(self, "handled_epoch", None))
                 if recovery != recovery_used:
                     current_points, follow_result, sent_window = [], None, None
-                    guidance = RouteGuidance(route["reference_path"], position, goal_point)
+                    # Keep ordered progress when localization correction invalidates the controller path.
                     budget = ProgressBudget(planner_patience_s=policy.get("planner_patience_s", 0.0),
                                             controller_patience_s=policy.get("controller_patience_s", 20.0))
                     recovery_used = recovery
@@ -736,6 +757,7 @@ class Executor(Node):
                 # FollowPath and verify measured stop before success below.
                 if (
                     remaining <= tolerance
+                    and not any(i >= guidance.index for i in guidance.checkpoints)
                     and route_remaining <= tolerance
                     and self.arrival_heading_ok(position, goal_point)
                 ):
@@ -753,7 +775,7 @@ class Executor(Node):
                     if not self.status(False)["ready"]:
                         raise RuntimeError("Localization or sensors lost at arrival")
                     stopped_pose = await self.wait_for_ready_pose(task_id)
-                    if self.hardware and getattr(self, "handled_recovery", 0) != recovery_used:
+                    if self.hardware and (getattr(self, "handled_recovery", 0), getattr(self, "handled_epoch", None)) != recovery_used:
                         continue
                     remaining = math.dist(
                         (stopped_pose["x"], stopped_pose["y"]),
@@ -802,7 +824,7 @@ class Executor(Node):
                     if len(points) < 2:
                         if not budget.planned(False, now):
                             raise RuntimeError(
-                                "No traversable path in the sensor costmap"
+                                "No traversable path in the sensor costmap: " + getattr(self, "planner_failure", "planner returned no path")
                             )
                         self.stopping = True
                         if not await self.release_controller(
@@ -815,7 +837,7 @@ class Executor(Node):
                         self.tasks.update(
                             task_id,
                             state="planning",
-                            reason="暂时无可行路径，停车等待并重规划",
+                            reason="暂时无可行路径，停车等待并重规划: " + getattr(self, "planner_failure", "planner returned no path"),
                         )
                         await self.pause(0.5)
                         continue

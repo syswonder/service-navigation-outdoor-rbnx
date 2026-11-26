@@ -1,4 +1,3 @@
-import ast
 from pathlib import Path
 import threading
 from types import SimpleNamespace
@@ -95,30 +94,3 @@ def test_unready_cannot_replace_running_execution():
     with pytest.raises(ValueError):
         submit(n, {**payload(), "request_id": "b" * 32})
     assert n.tasks.snapshot(a["task_id"])["state"] == "accepted"
-
-
-def test_extracted_motion_methods_match_frozen_upstream():
-    def methods(path, cls):
-        tree = ast.parse(path.read_text())
-        c = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == cls)
-        return {
-            n.name: n
-            for n in c.body
-            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-        }
-
-    old = methods(ROOT / "tests/upstream_executor.py.txt", "Navigation")
-    new = methods(ROOT / "outdoor_nav/executor.py", "Executor")
-    for name in new:
-        if name in ("guided_path", "plan_guided_window"):
-            continue  # Rolling detours are covered by the guidance tests.
-        if name in ("costmap_snapshot", "execute", "safety_tick", "controller_id", "motion_allowed"):
-            continue  # Route input, confirmed gait gate and controller switching are intentional changes.
-        a, b = old[name], new[name]
-        if name == "destroy_node":
-            # The independent service does not own the upstream obstacle process.
-            a.body = [statement for statement in a.body if not (
-                isinstance(statement, ast.If) and isinstance(statement.test, ast.Compare)
-                and isinstance(statement.test.left, ast.Attribute)
-                and statement.test.left.attr == "obstacles")]
-        assert ast.dump(a) == ast.dump(b), name

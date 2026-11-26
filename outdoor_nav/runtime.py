@@ -27,9 +27,10 @@ from sensor_msgs.msg import LaserScan, PointCloud2
 from std_msgs.msg import String, UInt32
 from tf2_ros import Buffer, TransformListener
 
+from .localization_policy import correction_pending
 from .configuration import load_runtime
-from .core.scan_health import healthy_scan
-from .core.gait import GaitSchedule, STAIRS
+from .core.scan_health import acquisition_time, acquisition_monotonic, healthy_scan
+from .core.gait import GaitSchedule, STAIRS, chassis_prepared
 from .core.scan_gate import stairs_obstacle_off
 from std_srvs.srv import Empty
 from .core.tasks import TaskStore, TERMINAL
@@ -236,7 +237,7 @@ class OutdoorExecutor(Executor):
                 self.gait_schedule = self.gait_task = None
                 return
             if self.gait_task != task["task_id"]:
-                self.gait_schedule = GaitSchedule(task["reference_path"], task["intervals"])
+                self.gait_schedule = GaitSchedule(task["reference_path"], task["intervals"], self.config.get("gait_boundary_tolerance_m", .25))
                 self.gait_task = task["task_id"]
             position = self.pose()
             if position is None or not 0 <= position["age_s"] < self.config.get("pose_timeout_s", 3.0):
@@ -249,9 +250,7 @@ class OutdoorExecutor(Executor):
             received_age = now - self.chassis_at
             health = self.status(False)["health"]
             eligible = (all(v for k, v in health.items() if k != "chassis")
-                        and received_age < 1. and body.get("state") == 17
-                        and body.get("usage_mode") == 1 and 0 <= mode_age < 3.
-                        and 0 <= motion_age < 1. and body.get("gait_output_enabled") is True)
+                        and chassis_prepared(body, received_age))
             # The stairs gait does not honour pure rotation, so rotations on a
             # stairs section temporarily switch the gait to flat (see
             # GaitSchedule.tick); detect them from the fresh controller output.
@@ -272,6 +271,13 @@ class OutdoorExecutor(Executor):
             if not status["motion_allowed"]:
                 self.command_pub.publish(Twist())
 
+    def safety_tick(self):
+        if correction_pending(self.geo, getattr(self, "handled_recovery", 0),
+                              getattr(self, "handled_epoch", None)):
+            self.command_pub.publish(Twist())
+            return
+        return super().safety_tick()
+
     def controller_id(self):
         return "StairsFollowPath" if self.gait_schedule and self.gait_schedule.target == STAIRS else "FollowPath"
 
@@ -287,20 +293,32 @@ class OutdoorExecutor(Executor):
                 and self.chassis.get("gait") == state.get("target_code")
                 and getattr(self, "active_controller", None) == self.controller_id())
 
-    async def wait_for_ready_pose(self, task_id):
+    async def synchronize_localization(self, task_id):
         recovery = (self.geo.get("fusion") or {}).get("recovery_id", 0)
-        if recovery != getattr(self, "handled_recovery", 0):
+        epoch = (self.geo.get("navigation_sample") or {}).get("epoch")
+        changed = correction_pending(self.geo, getattr(self, "handled_recovery", 0),
+                                     getattr(self, "handled_epoch", None))
+        if changed:
             self.stopping = True
             self.command_pub.publish(Twist())
             requests = getattr(self, "active_follow_requests", [])
             results = getattr(self, "active_follow_results", {})
             if not await self.release_controller(requests, results) or not await self.confirm_stop():
-                raise RuntimeError("Cannot release controller after RTK position correction")
+                raise RuntimeError("Cannot release controller after localization correction")
             self.handled_recovery = recovery
-            self.tasks.update(task_id, state="replanning", reason="RTK restored; replanning after position correction")
+            self.tasks.update(task_id, state="replanning", reason="Localization corrected/reset; replanning")
+        if epoch is not None:
+            self.handled_epoch = epoch
+        return changed
+
+    async def wait_for_ready_pose(self, task_id):
+        await self.synchronize_localization(task_id)
         was_stopping = self.stopping
         while True:
             position = await super().wait_for_ready_pose(task_id)
+            if await self.synchronize_localization(task_id):
+                was_stopping = True
+                continue
             self.gait_tick()
             task = self.tasks.snapshot(task_id, include_paths=False)
             gait = task.get("gait_status") or {}
@@ -320,8 +338,8 @@ class OutdoorExecutor(Executor):
 
     def on_geo(self, msg):
         self._state(msg, "geo")
-        recovery = (self.geo.get("fusion") or {}).get("recovery_id", 0)
-        if self.owner and recovery != getattr(self, "handled_recovery", 0):
+        if self.owner and correction_pending(self.geo, getattr(self, "handled_recovery", 0),
+                                             getattr(self, "handled_epoch", None)):
             self.stopping = True
             self.command_pub.publish(Twist())
 
@@ -342,13 +360,14 @@ class OutdoorExecutor(Executor):
             setattr(self, name, {})
 
     def on_scan(self, msg):
-        self.scan, self.scan_at = msg, time.monotonic()
-        if healthy_scan(
-            msg,
-            self.get_clock().now().nanoseconds / 1e9,
-            self.config["sensor_timeout_s"],
-        ):
-            self.mark("lidar")
+        now_s = self.get_clock().now().nanoseconds / 1e9
+        if not healthy_scan(msg, now_s, self.config["sensor_timeout_s"]):
+            return
+        if self.scan is not None and acquisition_time(msg) <= acquisition_time(self.scan):
+            return
+        self.scan = msg
+        self.scan_at = acquisition_monotonic(msg, now_s, time.monotonic())
+        self.stats["lidar"] = self.scan_at
 
     def stairs_active(self):
         task = self.tasks.snapshot(self.owner, include_paths=False) if self.owner else None
@@ -409,7 +428,9 @@ class OutdoorExecutor(Executor):
             ),
             motion_enabled=c["motion_enabled"],
             chassis=not c["require_chassis_ready"]
-            or (self.chassis.get("ready") is True and now - self.chassis_at < t),
+            or (chassis_prepared(self.chassis, now-self.chassis_at)
+                if self.runtime.get("gait_switching_enabled", False)
+                else self.chassis.get("ready") is True and now-self.chassis_at < t),
             production_mode=True,
             sensor_extrinsics=bool(g.get("extrinsics", {}).get("ready")),
             service_active=self.service_active,
@@ -527,17 +548,21 @@ class OutdoorExecutor(Executor):
         tolerance = self.tasks.snapshot(task_id)["arrival_tolerance_m"]
         if tolerance is None:
             raise RuntimeError("Task has no GNSS acceptance policy")
-        if not self.controller_parameters.service_is_ready():
-            raise RuntimeError("Controller parameter service is unavailable")
-        req = SetParametersAtomically.Request()
-        req.parameters = [
-            Parameter(
-                "goal_checker.xy_goal_tolerance", value=float(min(tolerance, 0.5))
-            ).to_parameter_msg()
-        ]
-        result = await self.result(self.controller_parameters.call_async(req), task_id)
-        if not result.result.successful:
-            raise RuntimeError("Controller rejected the task arrival tolerance")
+        configured = self.config["controller_goal_tolerance_m"]
+        effective = min(tolerance, configured)
+        if effective < configured or getattr(self, "controller_tolerance_overridden", False):
+            if not self.controller_parameters.service_is_ready():
+                raise RuntimeError("Controller parameter service is unavailable")
+            req = SetParametersAtomically.Request()
+            req.parameters = [
+                Parameter("goal_checker.xy_goal_tolerance", value=float(effective)).to_parameter_msg()
+            ]
+            # Keep restoration pending even when the request succeeds after our deadline.
+            self.controller_tolerance_overridden = True
+            result = await self.result(self.controller_parameters.call_async(req), task_id)
+            if not result.result.successful:
+                raise RuntimeError("Controller rejected the task arrival tolerance")
+            self.controller_tolerance_overridden = effective < configured
 
     async def guided_path(self, guidance, window, position, task_id):
         if self.controller_id() != "StairsFollowPath":

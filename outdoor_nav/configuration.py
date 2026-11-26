@@ -5,6 +5,7 @@ import math
 import os
 from pathlib import Path
 import re
+import yaml
 
 DEFAULTS = {
     "sensor_timeout_s": 1.0,
@@ -30,6 +31,7 @@ DEFAULTS = {
     "stopped_linear_mps": 0.10,
     "stopped_angular_rps": 0.06,
     "stop_hold_s": 1.0,
+    "gait_boundary_tolerance_m": .25,
     "gait_switch_timeout_s": 5.0,
     "gait_prepare_timeout_s": 15.0,
     "transform_tolerance_s": 3.0,
@@ -105,6 +107,7 @@ def validate(config, base=None):
         "fixed_arrival_m",
         "float_arrival_m",
         "stop_hold_s",
+        "gait_boundary_tolerance_m",
         "gait_switch_timeout_s",
         "gait_prepare_timeout_s",
         "footprint_radius_m",
@@ -185,6 +188,11 @@ def validate(config, base=None):
         or grid["width"] * grid["height"] / grid["resolution"] ** 2 > 16000000
     ):
         raise ValueError("Invalid grid dimensions")
+    params = yaml.safe_load(path.read_text())
+    tolerance = params["controller_server"]["ros__parameters"].get("goal_checker", {}).get("xy_goal_tolerance", .25)
+    if type(tolerance) not in (int, float) or not math.isfinite(tolerance) or tolerance < 0:
+        raise ValueError("Invalid controller goal tolerance")
+    policy["controller_goal_tolerance_m"] = float(tolerance)
     return {
         **config,
         "params_file": str(path.resolve()),

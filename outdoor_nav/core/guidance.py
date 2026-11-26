@@ -38,6 +38,13 @@ def projection(point, points):
     return best
 
 
+def entered_next_segment(point, a, b, c):
+    """Recognize an ordered corner detour, without searching later road arms."""
+    current = projection(point, [a, b])
+    following = projection(point, [b, c])
+    return following["offset_m"] > 0 and following["distance_m"] < current["distance_m"]
+
+
 def validate_point(value):
     if not isinstance(value, dict) or not all(
         isinstance(value.get(k), (int, float))
@@ -117,6 +124,43 @@ def observed_obstacle(point, grid, robot, now_s, timeout_s=3.0, scan=None):
             and grid.data[row*meta.width+col] >= 99)
 
 
+def gait_boundary_points(reference, intervals):
+    """Interpolate the recorded stations where gait changes, not ordinary samples."""
+    stations = sorted({a['end_m'] for a, b in zip(intervals, intervals[1:])
+                       if a['gait'] != b['gait']})
+    points, offset = [], 0.
+    for a, b in zip(reference, reference[1:]):
+        length = distance(a, b)
+        if length <= 1e-6:
+            continue
+        for station in stations:
+            if offset < station <= offset + length + 1e-6:
+                ratio = min(1., (station-offset)/length)
+                points.append({k: a[k]+ratio*(b[k]-a[k]) for k in ('x', 'y')})
+        offset += length
+    return points
+
+
+def insert_checkpoints(reference, checkpoints):
+    """Keep checkpoint order while inserting stations that are between survey points."""
+    if len(reference) < 2:
+        return list(reference)
+    result, pending = [], list(checkpoints)
+    for a, b in zip(reference, reference[1:]):
+        if not result or distance(result[-1], a) > 1e-6:
+            result.append(a)
+        while pending:
+            hit = projection(pending[0], [a, b])
+            if hit['distance_m'] > 1e-5:
+                break
+            point = pending.pop(0)
+            if distance(result[-1], point) > 1e-6:
+                result.append(point)
+    if not result or distance(result[-1], reference[-1]) > 1e-6:
+        result.append(reference[-1])
+    return result
+
+
 class SampledPolyline(Sequence):
     """Two-metre route stations computed on demand from the retained corners."""
 
@@ -160,15 +204,20 @@ class RouteGuidance:
     points rather than treating every road vertex as a stopping goal.
     """
 
-    def __init__(self, reference, start, goal):
+    def __init__(self, reference, start, goal, checkpoints=(), checkpoint_tolerance=.25):
         points = []
+        reference = insert_checkpoints(reference, checkpoints)
+        self.checkpoint_tolerance = checkpoint_tolerance
         for point in [start, *reference, goal]:
             point = validate_point(point)
             if not points or distance(points[-1], point) > 1e-6:
                 points.append(point)
         # Iterative Ramer-Douglas-Peucker, retaining bends to within 5 cm.
         keep = {0, len(points) - 1}
-        pending = [(0, len(points) - 1)]
+        keep.update(i for i, point in enumerate(points)
+                    if any(distance(point, checkpoint) < 1e-6 for checkpoint in checkpoints))
+        anchors = sorted(keep)
+        pending = list(zip(anchors, anchors[1:]))
         while pending:
             a, b = pending.pop()
             if b - a < 2:
@@ -188,6 +237,8 @@ class RouteGuidance:
         self.index = min(1, len(self.points) - 1)
         self.skipped = set()
         self.adjusted = {}
+        self.checkpoints = {index for index in self.points.indices
+                            if any(distance(self.points[index], p) < 1e-6 for p in checkpoints)}
 
     @property
     def final_leg(self):
@@ -210,18 +261,24 @@ class RouteGuidance:
             if self.index in self.skipped:
                 self.index += 1
                 continue
+            if self.index in self.checkpoints:
+                if distance(position, self.points[self.index]) > self.checkpoint_tolerance:
+                    break
+                self.index += 1
+                continue
             a, b = self.target(self.index - 1), self.target(self.index)
             dx, dy = b["x"] - a["x"], b["y"] - a["y"]
             px, py = position["x"] - b["x"], position["y"] - b["y"]
             crossed = px * dx + py * dy >= 0
             length = math.hypot(dx, dy)
             lateral = abs(px * dy - py * dx) / length if length else distance(position, b)
-            if distance(position, b) > 0.6 and not (crossed and lateral <= 1.5):
+            turned = entered_next_segment(position, a, b, self.target(self.index + 1))
+            if distance(position, b) > 0.6 and not (crossed and lateral <= 1.5) and not turned:
                 break
             self.index += 1
         end, ahead = self.index, distance(position, self.target(self.index))
         # Bound per-replan action calls even for extremely tightly spaced bends.
-        while end + 1 < len(self.points) and end - self.index < 11:
+        while end not in self.checkpoints and end + 1 < len(self.points) and end - self.index < 11:
             segment = distance(self.points[end], self.points[end + 1])
             if ahead + segment > 6.0 + 1e-6:
                 break

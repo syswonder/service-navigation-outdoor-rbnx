@@ -71,3 +71,16 @@ def test_stop_failure_recovers_only_after_release_and_standstill():
     n.confirm_stop.return_value = True
     asyncio.run(OutdoorExecutor.recover_stop(n))
     assert n.stop_failure is None and n.stop_recovery is None and n.startup_stopped
+
+
+def test_localization_reset_releases_old_path_even_without_rtk_recovery_id_change():
+    n = object.__new__(OutdoorExecutor)
+    n.__dict__.update(vars(fixture()))
+    n.handled_recovery = 2
+    n.handled_epoch = 'old'
+    n.geo['navigation_sample'] = {'epoch': 'new'}
+    with patch.object(Executor, "wait_for_ready_pose", new=AsyncMock(return_value={"x": 0, "y": 0})):
+        asyncio.run(OutdoorExecutor.wait_for_ready_pose(n, "task"))
+    n.release_controller.assert_awaited_once()
+    n.confirm_stop.assert_awaited_once()
+    assert n.handled_epoch == 'new' and n.stopping

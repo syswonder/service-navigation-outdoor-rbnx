@@ -180,7 +180,7 @@ def test_guided_path_bypasses_straight_samples_and_retries_when_needed():
             return value
 
         node = S(
-            hardware=False, global_map=None, scan=None, result=result,
+            hardware=False, global_map=None, scan=None, result=result, config={},
             path_client=S(send_goal_async=send),
             get_clock=lambda: S(now=lambda: S(to_msg=lambda: None, nanoseconds=0)),
         )

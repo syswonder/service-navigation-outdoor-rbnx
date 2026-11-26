@@ -46,6 +46,8 @@ def test_one_meter_before_and_after_boundaries():
     schedule = GaitSchedule(REFERENCE, INTERVALS)
     assert tick(schedule, 3.99)[1]["target_code"] == FLAT
     assert tick(schedule, 4.)[0] == STAIRS
+    tick(schedule, 5., .5, STAIRS)
+    tick(schedule, 10., .8, STAIRS)
     assert tick(schedule, 10.99, 1., STAIRS)[1]["confirmed"]
     assert tick(schedule, 11., 2., STAIRS)[0] == FLAT
 
@@ -82,6 +84,7 @@ def test_reverse_route_and_start_inside_stairs():
     inside = GaitSchedule(REFERENCE, [{"start_m":0., "end_m":3., "gait":"stairs", "gait_code":STAIRS},
                                      {"start_m":3., "end_m":20., "gait":"flat", "gait_code":FLAT}])
     assert tick(inside,0.)[0] == STAIRS
+    tick(inside,3.,.5,STAIRS)
     assert tick(inside,4.,1.,STAIRS)[0] == FLAT
 
 
@@ -176,6 +179,8 @@ def test_worker_stops_until_actual_feedback_and_controller_match(monkeypatch):
     velocities=[]
     node.command_pub=SimpleNamespace(publish=lambda msg:velocities.append(msg.linear.x))
     node.stopping = False
+    node.raw_received = 100.
+    node.raw_command = SimpleNamespace(linear=SimpleNamespace(x=0.), angular=SimpleNamespace(z=0.))
     node.chassis = {"state":17,"gait":FLAT,"usage_mode":1,"motion_feedback_age_s":.01,
                     "usage_mode_age_s":.01,"gait_output_enabled":True}
     node.chassis_at = 100.

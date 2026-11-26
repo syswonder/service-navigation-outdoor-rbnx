@@ -3,11 +3,21 @@
 from copy import deepcopy
 import math
 
-from .guidance import distance, projection
+from .guidance import distance, projection, entered_next_segment, gait_boundary_points, insert_checkpoints
 
 FLAT = 0x3002
 STAIRS = 0x3003
 RAW_GAITS = {"flat": (0x1001, FLAT), "stairs": (0x1003, STAIRS)}
+
+
+def chassis_prepared(body, received_age):
+    """Mode and feedback permit a gait request; actual gait gates velocity later."""
+    ages = ((received_age, 1.), (body.get("motion_feedback_age_s"), 1.),
+            (body.get("usage_mode_age_s"), 3.))
+    return (body.get("state") == 17 and body.get("usage_mode") == 1
+            and body.get("gait_output_enabled") is True
+            and all(type(age) in (int, float) and math.isfinite(age) and 0 <= age < limit
+                    for age, limit in ages))
 
 
 def route_length(reference):
@@ -41,7 +51,9 @@ def validate_intervals(reference, intervals):
 
 
 class RouteStation:
-    def __init__(self, reference):
+    def __init__(self, reference, checkpoints=(), checkpoint_tolerance=.25):
+        reference = insert_checkpoints(reference, checkpoints)
+        self.checkpoint_tolerance = checkpoint_tolerance
         self.points = [reference[0]]
         for point in reference[1:]:
             if distance(self.points[-1], point) > 1e-6:
@@ -50,33 +62,43 @@ class RouteStation:
         for a, b in zip(self.points, self.points[1:]):
             self.offsets.append(self.offsets[-1] + distance(a, b))
         self.index, self.station = 0, 0.0
+        self.checkpoints = {i for i, point in enumerate(self.points)
+                            if any(distance(point, p) < 1e-6 for p in checkpoints)}
+        self.passed = set()
 
     def update(self, point):
         if len(self.points) < 2:
             return 0.0
         while self.index + 2 < len(self.points):
             a, b, c = self.points[self.index:self.index + 3]
+            boundary = self.index + 1
+            if boundary in self.checkpoints and boundary not in self.passed:
+                if distance(point, b) > self.checkpoint_tolerance:
+                    break
+                self.passed.add(boundary)
+                self.index += 1
+                continue
             dx, dy = b["x"] - a["x"], b["y"] - a["y"]
             px, py = point["x"] - b["x"], point["y"] - b["y"]
             crossed = px * dx + py * dy >= 0
             lateral = abs(px * dy - py * dx) / math.hypot(dx, dy)
-            current = projection(point, [a, b])
-            following = projection(point, [b, c])
-            # A controller rounds corners; it need not pass through the vertex.
-            turning = (distance(point, b) <= 0.75
-                       and following["distance_m"] < current["distance_m"])
+            turning = entered_next_segment(point, a, b, c)
             if not ((crossed and lateral <= 1.5) or turning):
                 break
             self.index += 1
         current = projection(point, self.points[self.index:self.index + 2])
-        self.station = max(self.station, self.offsets[self.index] + current["offset_m"])
+        station = self.offsets[self.index] + current["offset_m"]
+        boundary = self.index + 1
+        if boundary in self.checkpoints and boundary not in self.passed:
+            station = min(station, self.offsets[boundary]-1e-6)
+        self.station = max(self.station, station)
         return self.station
 
 
 class GaitSchedule:
-    def __init__(self, reference, intervals):
+    def __init__(self, reference, intervals, checkpoint_tolerance=.25):
         self.intervals = validate_intervals(reference, intervals)
-        self.route = RouteStation(reference)
+        self.route = RouteStation(reference, gait_boundary_points(reference, self.intervals), checkpoint_tolerance)
         self.stairs = []
         total = route_length(reference)
         for interval in self.intervals:
