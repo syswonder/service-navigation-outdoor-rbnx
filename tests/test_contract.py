@@ -94,3 +94,20 @@ def test_unready_cannot_replace_running_execution():
     with pytest.raises(ValueError):
         submit(n, {**payload(), "request_id": "b" * 32})
     assert n.tasks.snapshot(a["task_id"])["state"] == "accepted"
+def test_record_configuration_defaults_and_bounds():
+    c = validate(cfg())
+    assert c["record"]["enabled"] is True and c["record"]["dir"] == "records"
+    c = validate(cfg(record={"enabled": False, "state_hz": 5, "imu_enabled": False}))
+    assert c["record"]["enabled"] is False and c["record"]["state_hz"] == 5
+    assert c["record"]["imu_enabled"] is False
+    for bad in (
+        {"dir": "/tmp/records"},
+        {"dir": "../records"},
+        {"scan_hz": 0},
+        {"flush_s": 10},
+        {"max_run_mb": 4096, "max_total_mb": 8},
+        {"imu_topic": "wit"},
+        {"unknown_key": True},
+    ):
+        with pytest.raises(ValueError):
+            validate(cfg(record=bad))

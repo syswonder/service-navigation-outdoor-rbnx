@@ -14,6 +14,8 @@ service:
         tf_static: /tf_static
         chassis: /outdoor/chassis_status
       velocity_output_topic: /robonix/nomotion/outdoor_cmd_vel
+      record:
+        enabled: true
       policy:
         motion_enabled: false
         # Set calibration/feedback confirmations only after measuring them.

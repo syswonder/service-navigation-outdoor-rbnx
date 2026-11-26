@@ -111,6 +111,7 @@ class Watchdog(Node):
                         "conflict": self.conflict,
                         "diagnostic": self.diagnostic,
                         "output_topic": self.pub.topic_name,
+                        "output": {"v": output.linear.x, "w": output.angular.z},
                         "blocked_reasons": blockers,
                     }
                 )

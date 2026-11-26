@@ -26,6 +26,7 @@
 - `outdoor_nav/atlas_bridge.py`：Atlas 依赖发现，Driver 生命周期，gRPC/MCP 能力。
 - `outdoor_nav/runtime.py`、`executor.py`：唯一执行 owner、滚动窗口、停车确认和状态。
 - `outdoor_nav/guard.py`：独立速度/扫描/定位看门狗，保留原链路的失效归零。
+- `outdoor_nav/recorder.py`：执行期数据记录，独立线程写盘，见 [docs/RECORDING.md](docs/RECORDING.md)。
 - `outdoor_nav/service.launch.py`：仅启动投影、执行器、守卫及 Nav2；不启动外部传感器与定位。
 - `tests/`：冻结算法对照、参数/请求/生命周期、Scene/gRPC 接入和隔离 Nav2 楼梯测试。
 - `docs/upstream-snapshot.json`：被提取源码的 SHA-256；`tests/upstream_executor.py.txt` 是只用于对比的冻结参照。

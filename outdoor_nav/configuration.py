@@ -7,6 +7,8 @@ from pathlib import Path
 import re
 import yaml
 
+from .recorder import validate as validate_record
+
 DEFAULTS = {
     "sensor_timeout_s": 1.0,
     "pose_timeout_s": 3.0,
@@ -193,6 +195,7 @@ def validate(config, base=None):
     if type(tolerance) not in (int, float) or not math.isfinite(tolerance) or tolerance < 0:
         raise ValueError("Invalid controller goal tolerance")
     policy["controller_goal_tolerance_m"] = float(tolerance)
+    record = validate_record(config.get("record"))
     return {
         **config,
         "params_file": str(path.resolve()),
@@ -202,6 +205,7 @@ def validate(config, base=None):
         "gait_switching_enabled": gait_enabled,
         "gait_output_topic": gait_output,
         "global_grid": grid,
+        "record": record,
     }
 
 

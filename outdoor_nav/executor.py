@@ -78,9 +78,36 @@ def lateral_difference(a, b):
 
 
 class Executor(Node):
+    # Runtime installs a Recorder; other executors keep recording disabled.
+    recorder = None
+    odom_twist = (0.0, 0.0)
+
     def mark(self, key):
         with self.state_lock:
             self.stats[key] = time.monotonic()
+
+    def record_begin(self, task_id, state):
+        if self.recorder is None:
+            return
+        try:
+            self.recorder.start(
+                {
+                    "task_id": task_id,
+                    "goal": state.get("goal"),
+                    "map_id": state.get("map_id"),
+                    "route_length_m": length(state.get("reference_path") or []),
+                }
+            )
+        except Exception as error:  # Recording must never fail a task.
+            self.get_logger().error(f"Recording did not start: {error}")
+
+    def record_end(self, outcome, reason):
+        if self.recorder is None:
+            return
+        try:
+            self.recorder.stop(outcome, reason)
+        except Exception as error:
+            self.get_logger().error(f"Recording did not finish: {error}")
 
     def on_clock(self, msg):
         value = msg.clock.sec + msg.clock.nanosec / 1e9
@@ -219,6 +246,7 @@ class Executor(Node):
             return
         self.velocity = (math.hypot(t.linear.x, t.linear.y), abs(t.angular.z))
         self.velocity_at = time.monotonic() - max(0, age)
+        self.odom_twist = (t.linear.x, t.angular.z)
 
     def on_command(self, msg):
         self.raw_command, self.raw_received = msg, time.monotonic()
@@ -702,6 +730,7 @@ class Executor(Node):
             state = self.tasks.snapshot(task_id, include_paths=True)
             if self.interrupted(task_id):
                 raise InterruptedError("Task canceled before planning")
+            self.record_begin(task_id, state)
             self.active_follow_requests, self.active_follow_results = follow_requests, follow_results
             self.tasks.update(task_id, state="planning")
             position = await self.wait_for_ready_pose(task_id)
@@ -972,6 +1001,7 @@ class Executor(Node):
             self.handles.pop(task_id, None)
             self.requests.pop(task_id, None)
             self.cancel_sent.discard(task_id)
+            self.record_end(outcome, reason)
             if handle.is_cancel_requested:
                 handle.canceled()
             elif outcome == "succeeded":

@@ -94,6 +94,7 @@ class Watchdog(Node):
         self.pub.publish(output)
         self.status_pub.publish(String(data=json.dumps({'conflict': self.conflict,
             'diagnostic': self.diagnostic, 'output_topic': self.pub.topic_name,
+            'output': {'v': output.linear.x, 'w': output.angular.z},
             'blocked_reasons': blockers})))
 
     def destroy_node(self):

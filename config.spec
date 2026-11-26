@@ -64,6 +64,9 @@ properties:
   run_dir:
     type: string
     description: Owned runtime files, PID, journal and logs.
+  record:
+    type: object
+    description: Execution-scoped sensor recording under run_dir; started when a task begins planning and stopped when it finishes. Text and 2D scans only, never point clouds.
   http_port:
     type: integer
     default: 19975

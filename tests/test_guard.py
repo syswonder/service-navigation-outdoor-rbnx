@@ -1,4 +1,5 @@
 import ast
+import json
 import math
 from pathlib import Path
 from types import SimpleNamespace as S
@@ -70,6 +71,27 @@ def test_guard_limits_and_nonfinite_velocity():
     with patch("outdoor_nav.guard.time.monotonic", return_value=10.0):
         Watchdog.tick(n)
     assert n.pub.publish.call_args.args[0].linear.x == 0
+
+
+def test_status_reports_the_guarded_output():
+    n = fixture()
+    n.command.linear.x = 4.0
+    n.command.angular.z = -3.0
+    with patch("outdoor_nav.guard.time.monotonic", return_value=10.0):
+        Watchdog.tick(n)
+    payload = json.loads(n.status_pub.publish.call_args.args[0].data)
+    assert payload["output"] == {"v": 0.4, "w": -0.4}
+    assert payload["blocked_reasons"] == []
+
+
+def test_blocked_status_reports_zero_output():
+    n = fixture()
+    n.ready = False
+    with patch("outdoor_nav.guard.time.monotonic", return_value=10.0):
+        Watchdog.tick(n)
+    payload = json.loads(n.status_pub.publish.call_args.args[0].data)
+    assert payload["output"] == {"v": 0.0, "w": 0.0}
+    assert payload["blocked_reasons"] == ["localization_unready"]
 
 
 def test_localization_has_three_seconds_but_command_and_scan_stay_fresh():

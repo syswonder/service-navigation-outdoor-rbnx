@@ -2,6 +2,7 @@
 
 import argparse
 import base64
+import collections
 import json
 import math
 from pathlib import Path
@@ -23,12 +24,13 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.qos import QoSProfile, qos_profile_sensor_data
 from rclpy.parameter import Parameter
 from rclpy.signals import SignalHandlerOptions
-from sensor_msgs.msg import LaserScan, PointCloud2
+from sensor_msgs.msg import Imu, LaserScan, PointCloud2
 from std_msgs.msg import String, UInt32
 from tf2_ros import Buffer, TransformListener
 
 from .localization_policy import correction_pending
 from .configuration import load_runtime
+from .recorder import Recorder
 from .core.scan_health import acquisition_time, acquisition_monotonic, healthy_scan
 from .core.gait import GaitSchedule, STAIRS, chassis_prepared
 from .core.scan_gate import stairs_obstacle_off
@@ -119,11 +121,23 @@ class OutdoorExecutor(Executor):
         self.path_pub = self.create_publisher(
             NavPath, "/navigation/execution_path", LATCHED
         )
+        self.record = self.runtime.get("record") or {}
+        self.recorder = (
+            Recorder(self.record, self.runtime.get("run_dir", "rbnx-build/runtime"))
+            if self.record.get("enabled", True)
+            else None
+        )
+        # The writer thread owns encoding and disk I/O; callbacks only cache.
+        self.imu_samples = collections.deque(maxlen=1000)
+        self.scan_recorded_at = -math.inf
+        self.safe_command, self.safe_received = Twist(), 0.0
+        self.odom_twist = (0.0, 0.0)
         for kind, name, callback, qos in (
             (OccupancyGrid, "/global_costmap/costmap", self.on_global, LATCHED),
             (OccupancyGrid, "/local_costmap/costmap", self.on_local, LATCHED),
             (Odometry, "/outdoor/odom", self.on_odom, 10),
             (Twist, "/navigation/controller_command", self.on_command, 10),
+            (Twist, "/outdoor/safe_command", self.on_safe, 10),
             (String, "/outdoor/localization", self.on_geo, 10),
             (String, "/outdoor/command_status", self.on_guard, 10),
             (String, "/outdoor/chassis_status", self.on_chassis, 10),
@@ -132,6 +146,11 @@ class OutdoorExecutor(Executor):
              qos_profile_sensor_data),
         ):
             self.create_subscription(kind, name, callback, qos)
+        if self.recorder is not None and self.record.get("imu_enabled", True):
+            self.create_subscription(
+                Imu, self.record.get("imu_topic", "/wit_10axis/data"),
+                self.on_imu, qos_profile_sensor_data,
+            )
         self.server = ActionServer(
             self,
             NavigateToPose,
@@ -150,6 +169,7 @@ class OutdoorExecutor(Executor):
             (0.1, self.check_stationary),
             (0.1, self.gait_tick),
             (0.1, self.scan_gate_tick),
+            (1.0 / max(1.0, self.record.get("state_hz", 10.0)), self.record_tick),
         ):
             self.create_timer(
                 interval, callback, clock=self.steady, callback_group=self.group
@@ -344,10 +364,116 @@ class OutdoorExecutor(Executor):
             self.command_pub.publish(Twist())
 
     def on_guard(self, msg):
+        before = tuple((self.guard or {}).get("blocked_reasons") or ())
         self._state(msg, "guard")
+        after = tuple((self.guard or {}).get("blocked_reasons") or ())
+        if after != before and self.recorder is not None:
+            self.recorder.event("blockers", reasons=list(after))
 
     def on_chassis(self, msg):
+        before = (self.chassis or {}).get("gait")
         self._state(msg, "chassis")
+        after = (self.chassis or {}).get("gait")
+        if after != before and self.recorder is not None:
+            self.recorder.event("gait", gait=after)
+
+    def on_safe(self, msg):
+        self.safe_command, self.safe_received = msg, time.monotonic()
+
+    def on_imu(self, msg):
+        """Cache one sample; the writer thread formats and encodes it."""
+        if self.recorder is None or not self.recorder.active:
+            return
+        q = msg.orientation
+        roll = math.atan2(
+            2 * (q.w * q.x + q.y * q.z), 1 - 2 * (q.x * q.x + q.y * q.y)
+        )
+        pitch = math.asin(max(-1.0, min(1.0, 2 * (q.w * q.y - q.z * q.x))))
+        yaw = math.atan2(
+            2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z)
+        )
+        a, g = msg.linear_acceleration, msg.angular_velocity
+        self.imu_samples.append(
+            (
+                time.time(),
+                time.monotonic(),
+                a.x, a.y, a.z,
+                g.x, g.y, g.z,
+                roll, pitch, yaw,
+            )
+        )
+
+    def record_tick(self):
+        recorder = self.recorder
+        if recorder is None or not recorder.active:
+            return
+        now = time.monotonic()
+        samples = []
+        while self.imu_samples:
+            t, mono, ax, ay, az, gx, gy, gz, roll, pitch, yaw = (
+                self.imu_samples.popleft()
+            )
+            samples.append(
+                {
+                    "t": t, "mono": mono,
+                    "a": [ax, ay, az], "g": [gx, gy, gz],
+                    "rpy": [roll, pitch, yaw],
+                }
+            )
+        if samples:
+            recorder.imu(samples)
+        if now - self.scan_recorded_at >= 1.0 / self.record.get("scan_hz", 2.0):
+            if self.scan is not None and now - self.scan_at < self.config[
+                "sensor_timeout_s"
+            ]:
+                self.scan_recorded_at = now
+                recorder.scan(
+                    [
+                        round(value, 2) if math.isfinite(value) else None
+                        for value in self.scan.ranges
+                    ]
+                )
+        geo = self.geo or {}
+        sample = geo.get("navigation_sample") or {}
+        pose, odom = geo.get("pose") or {}, sample.get("odom_pose") or {}
+        chassis, guard = self.chassis or {}, self.guard or {}
+        task_state = None
+        if self.owner:
+            try:
+                task_state = self.tasks.snapshot(
+                    self.owner, include_paths=False
+                )["state"]
+            except (KeyError, TypeError):
+                task_state = None
+        command, safe = self.raw_command, self.safe_command
+        recorder.state(
+            task=task_state,
+            pose={"x": pose.get("x"), "y": pose.get("y"), "yaw": pose.get("yaw")}
+            if pose
+            else None,
+            odom={"x": odom.get("x"), "y": odom.get("y"), "yaw": odom.get("yaw")}
+            if odom
+            else None,
+            grade=geo.get("grade"),
+            pose_age=geo.get("pose_age_s"),
+            heading=(geo.get("heading") or {}).get("body_yaw_enu_rad"),
+            cmd={"v": command.linear.x, "w": command.angular.z}
+            if self.raw_received
+            else None,
+            safe={"v": safe.linear.x, "w": safe.angular.z}
+            if self.safe_received
+            else None,
+            out=guard.get("output"),
+            actual={"v": self.odom_twist[0], "w": self.odom_twist[1]}
+            if self.odom_twist
+            else None,
+            chassis={
+                "gait": chassis.get("gait"),
+                "state": chassis.get("state"),
+                "ready": chassis.get("ready"),
+            },
+            blockers=guard.get("blocked_reasons") or [],
+        )
 
     def _state(self, msg, name):
         try:
