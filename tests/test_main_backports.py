@@ -63,3 +63,19 @@ def test_standing_mode_can_prepare_but_wrong_mode_cannot():
     assert chassis_prepared(body,.01)
     assert not chassis_prepared(body|{'usage_mode':0},.01)
     assert not chassis_prepared(body,2.)
+
+
+def test_journal_from_another_version_still_loads(tmp_path):
+    import json
+    from outdoor_nav.core.tasks import TaskStore
+    journal = tmp_path / 'tasks.json'
+    journal.write_text(json.dumps({
+        'current_id': 'a' * 32,
+        'tasks': [{'task_id': 'a' * 32, 'goal': {'x': 0., 'y': 0.}, 'blocked_road_ids': [],
+                   'state': 'navigating',
+                   'terrain_status': {'phase': 'stairs'}, 'vision_epoch': 3}],
+    }))
+    store = TaskStore(journal=journal)
+    saved = store.snapshot('a' * 32)
+    assert saved['state'] == 'failed'
+    assert 'terrain_status' not in saved

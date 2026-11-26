@@ -1,7 +1,7 @@
 """Thread-safe task ownership independent of HTTP and ROS action callbacks."""
 
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 import threading
 import uuid
 import json
@@ -51,7 +51,13 @@ class TaskStore:
         self.journal = Path(journal) if journal else None
         if self.journal and self.journal.exists():
             saved = json.loads(self.journal.read_text())
-            self.tasks = {t["task_id"]: Task(**t) for t in saved["tasks"]}
+            # A journal written by another package version can carry fields this
+            # one no longer has; one unknown key must not stop the service.
+            known = {item.name for item in fields(Task)}
+            self.tasks = {
+                t["task_id"]: Task(**{k: v for k, v in t.items() if k in known})
+                for t in saved["tasks"]
+            }
             self.current_id = saved["current_id"]
             for task in self.tasks.values():
                 if task.state not in TERMINAL:
