@@ -135,19 +135,12 @@ class GaitSchedule:
     def tick(self, position, now, actual, feedback_age_s, eligible, stopped=False, timeout_s=5., prepare_timeout_s=15., rotating=False):
         station = self.route.update(position)
         desired = self.desired(station)
-        # Only a robot that has actually stopped may trade the stairs gait for
-        # the flat one to turn in place. A moving climb emits small rotation
-        # corrections all the time; treating those as in-place turns flipped the
-        # gait every few seconds and the robot never got up a step.
-        if rotating and desired == STAIRS and stopped:
-            if not self.rotation_hold:
-                self.rotation_hold = True
-            self.rotation_since = now
-        elif self.rotation_hold and (not rotating and self.rotation_since is not None
-                                     and now - self.rotation_since >= 1.0):
-            self.rotation_hold = False
-            self.rotation_since = None
-        target = FLAT if self.rotation_hold and desired == STAIRS else desired
+        # The chassis turns in place in the stairs gait as well (field check
+        # with the remote), so a rotation command must not trade the gait. The
+        # old override flipped stairs<->flat every few seconds while climbing
+        # and the robot never got up a step.
+        self.rotation_hold = False
+        target = desired
         if target != self.target:
             self.target, self.last_sent, self.attempts = target, -math.inf, 0
             self.switch_started = self.prepare_started = None
