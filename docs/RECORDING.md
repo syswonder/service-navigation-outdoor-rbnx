@@ -70,7 +70,7 @@ record:
 ## 取回和复盘
 
 ```bash
-scp -P 6003 -r "nvidia@svr.gddg08.top:/home/nvidia/outdoorNav-workspace/robot-deep_robotics-lynx_s10/outdoor/run/navigation/records/2026*" ./records/
+scp -r "nvidia@10.29.1.4:/home/nvidia/outdoorNav-workspace/robot-deep_robotics-lynx_s10/outdoor/run/navigation/records/2026*" ./records/
 python3 scripts/summarize_record.py records/<目录> --csv run.csv
 ```
 
